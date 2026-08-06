@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1
+# server 镜像(应急部署用)——本地已预构建 dist/,服务器只装 prod 依赖 + 拷产物。
+#
+# 与 Dockerfile.server 的区别:
+#   Dockerfile.server        ——CI 用,从源码完整 build(装 devDeps + tsc),需大内存
+#   Dockerfile.server.prebuilt ——deploy.sh 用,本地已 build 好,服务器只装运行时依赖
+#
+# 本地构建产物已由 deploy.sh 第 0 步生成:
+#   packages/shared/dist/  packages/db/dist/  apps/server/dist/
+#
+# 本 Dockerfile 不跑 pnpm build / tsc,只 pnpm install --prod(6 个运行时依赖),
+# 极快、极省内存,适合低配服务器。配合 Dockerfile.server.prebuilt.dockerignore
+# (允许 dist/ 进入构建上下文,覆盖根 .dockerignore 的排除规则)。
+
+FROM node:22-slim
+WORKDIR /app
+ENV NODE_ENV=production
+
+# corepack 指向国内镜像,加速 pnpm 下载(海外构建可 --build-arg 覆盖)
+ARG COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
+ENV COREPACK_NPM_REGISTRY=${COREPACK_NPM_REGISTRY}
+RUN corepack enable && corepack prepare pnpm@11.1.2 --activate
+
+# 只拷 workspace 配置 + 各包 package.json(frozen-lockfile 校验一致性需要全 workspace 在场)
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/shared/package.json packages/shared/
+COPY packages/db/package.json packages/db/
+COPY apps/server/package.json apps/server/
+# 只装运行时依赖(无 devDependencies),极快
+RUN pnpm install --frozen-lockfile --prod
+
+# 拷本地预构建产物 + db migrations(运行时 migrate/seed 用)
+COPY packages/shared/dist/ ./packages/shared/dist/
+COPY packages/db/dist/ ./packages/db/dist/
+COPY packages/db/migrations/ ./packages/db/migrations/
+COPY apps/server/dist/ ./apps/server/dist/
+
+ENV SERVER_PORT=3000
+EXPOSE 3000
+
+# 健康检查(node fetch,不依赖 curl)
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD node -e "fetch('http://localhost:'+process.env.SERVER_PORT+'/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+CMD ["node", "apps/server/dist/index.js"]

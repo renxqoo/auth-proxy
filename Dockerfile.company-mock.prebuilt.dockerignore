@@ -1,0 +1,18 @@
+# prebuilt 专用 dockerignore —— 配合 Dockerfile.company-mock.prebuilt。
+# 详见 Dockerfile.server.prebuilt.dockerignore 的说明(同样的设计动机)。
+
+node_modules
+**/node_modules
+.turbo
+**/.turbo
+.git
+*.log
+
+.env
+.env.*
+**/.env
+**/.env.*
+
+.DS_Store
+.zcode
+.zcode/*

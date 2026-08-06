@@ -1,0 +1,56 @@
+# syntax=docker/dockerfile:1
+# admin-web 镜像(应急部署用)——本地已 next build 生成 standalone,服务器直接装+拷。
+#
+# 与 Dockerfile.admin-web 的区别:
+#   Dockerfile.admin-web            ——CI 用,从源码 pnpm install + next build
+#   Dockerfile.admin-web.prebuilt   ——deploy.sh 用,本地已 build 好,服务器轻量构建
+#
+# 为什么不直接 COPY standalone 零安装:
+#   Next.js standalone 在 pnpm workspace 下,apps/admin-web/node_modules/next 是软链,
+#   指向 node_modules/.pnpm/next@x.x.x/...。docker COPY 跨目录软链时,真实文件
+#   (在 node_modules/.pnpm/ 下)会被构建上下文的 dockerignore 打散或软链断裂,
+#   导致运行时报 `Cannot find module 'next'`。
+#
+# 解决:镜像里 pnpm install --prod 装真实的 next 等 deps(硬目录),只从本地拷
+#   .next 构建产物(页面 + 静态资源)+ public + standalone 的 server.js 入口。
+#   .next/server 产物只 require("next/dist/*") 和 node 内置模块,无其它外部依赖,
+#   只要 next 可解析即可运行。
+#
+# 本地构建产物已由 deploy.sh 第 0 步生成:apps/admin-web/.next/
+# 配合 Dockerfile.admin-web.prebuilt.dockerignore(允许 .next 进入上下文)。
+
+FROM node:22-slim
+WORKDIR /app
+ENV NODE_ENV=production
+
+ARG COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
+ENV COREPACK_NPM_REGISTRY=${COREPACK_NPM_REGISTRY}
+RUN corepack enable && corepack prepare pnpm@11.1.2 --activate
+
+# 装 admin-web 运行时依赖(next/react/react-dom 等)。
+# 全 workspace 的 package.json 都拷上,让 frozen-lockfile 一致性校验通过。
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/shared/package.json packages/shared/
+COPY packages/db/package.json packages/db/
+COPY apps/server/package.json apps/server/
+COPY apps/company-mock/package.json apps/company-mock/
+COPY apps/admin-web/package.json apps/admin-web/
+# --filter admin-web... 只装 admin-web 及其依赖(workspace 内无依赖,即只装自己)
+# shamefully-hoist:把 next/rea/react-dom 提到根 node_modules,确保 require('next')
+# 无论从哪个目录解析都能命中(防 pnpm 软链层级问题)
+RUN pnpm install --frozen-lockfile --prod --filter admin-web... --shamefully-hoist
+
+# 拷本地预构建产物:
+#   .next/   —— 页面产物(server/) + 静态资源(static/),运行时 server.js 读它
+#   public/  —— 静态文件
+#   server.js —— next standalone 入口(从 standalone 子树取出,放到 apps/admin-web/ 下
+#                与 .next 同级,因为 server.js 用 __dirname 作根、期望 ./next 存在)
+COPY apps/admin-web/.next/ ./apps/admin-web/.next/
+COPY apps/admin-web/public ./apps/admin-web/public
+COPY apps/admin-web/.next/standalone/apps/admin-web/server.js ./apps/admin-web/server.js
+
+ENV PORT=3001
+ENV HOSTNAME=0.0.0.0
+
+EXPOSE 3001
+CMD ["node", "apps/admin-web/server.js"]

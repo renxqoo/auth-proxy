@@ -1,0 +1,25 @@
+# prebuilt 专用 dockerignore —— 配合 Dockerfile.server.prebuilt。
+#
+# 与根 .dockerignore 的关键区别:
+#   根 .dockerignore 排除 **/dist(CI 从源码 build,不需要 dist)。
+#   本文件不排除 dist —— 因为 prebuilt 模式恰恰需要本地构建好的 dist 进入上下文。
+#
+# 仍排除:node_modules(平台不同,服务器按需重装)、凭证、缓存等。
+
+node_modules
+**/node_modules
+.turbo
+**/.turbo
+.git
+*.log
+
+# 环境变量文件(任何层级都不进镜像)
+.env
+.env.*
+**/.env
+**/.env.*
+
+# 本地工具/IDE 数据
+.DS_Store
+.zcode
+.zcode/*

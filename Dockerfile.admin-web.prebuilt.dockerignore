@@ -1,0 +1,21 @@
+# prebuilt 专用 dockerignore —— 配合 Dockerfile.admin-web.prebuilt。
+#
+# 与根 .dockerignore 的关键区别:
+#   根 .dockerignore 排除 **/.next(CI 从源码 next build,不需要本地产物)。
+#   本文件不排除 .next —— 因为 prebuilt 模式需要本地构建好的 standalone 产物进入上下文。
+
+node_modules
+**/node_modules
+.turbo
+**/.turbo
+.git
+*.log
+
+.env
+.env.*
+**/.env
+**/.env.*
+
+.DS_Store
+.zcode
+.zcode/*

@@ -21,9 +21,10 @@
 #   - server 容器 NODE_ENV=production,启动时 assertProductionConfig() 二次校验。
 #
 # 用法:
-#   ./deploy.sh                  # 全量部署(上传 + 构建 + 重启)
-#   RESTART_ONLY=1 ./deploy.sh   # 仅重启容器(代码已最新)
-#   FORCE_NEW_SECRETS=1 ./deploy.sh  # 强制重新生成机器密钥(注意:改 POSTGRES_PASSWORD
+#   PUBLIC_BASE_URL=http://公网IP SSH_HOST=服务器IP ./deploy.sh   # 全量部署(本地构建+上传+轻量构建+重启)
+#   RESTART_ONLY=1 SSH_HOST=服务器IP ./deploy.sh                 # 仅重启容器(代码已最新)
+#   FORCE_NEW_SECRETS=1 PUBLIC_BASE_URL=http://公网IP SSH_HOST=服务器IP ./deploy.sh
+#                                    # 强制重新生成机器密钥(注意:改 POSTGRES_PASSWORD
 #                                    # 后旧 pg_data 卷认证会失败,需手动 docker volume rm)
 #
 set -euo pipefail
@@ -33,8 +34,27 @@ SSH_USER="${SSH_USER:-root}"
 SSH_HOST="${SSH_HOST:?SSH_HOST 未设置,用法:SSH_HOST=服务器IP ./deploy.sh}"
 SSH_PORT="${SSH_PORT:-22}"
 REMOTE_DIR="/opt/auth-proxy"
-# 对外可访问的公网地址(拼 verification_uri 用,防 host header 注入)
-PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-http://${SSH_HOST}}"
+# 对外可访问的公网地址(拼 verification_uri 用,防 host header 注入)。
+# 必填:不设则报错退出。理由:之前默认值 http://${SSH_HOST} 看似合理,
+# 但 CI 路径曾用 hostname -I 推导 → 返回内网 IP(如 172.24.x.x),
+# 导致 CLI 收到的登录链接指向内网,公网打不开。强制显式传值避免再踩坑。
+PUBLIC_BASE_URL="${PUBLIC_BASE_URL:?PUBLIC_BASE_URL 未设置。用法: PUBLIC_BASE_URL=http://公网IP SSH_HOST=服务器IP ./deploy.sh}"
+# 内网地址防御:即使显式传了,若是内网网段也拒绝(防误填/防从旧配置粘进来的值)。
+# 覆盖常见内网段:10.0.0.0/8、172.16.0.0/12、192.168.0.0/16、169.254 链路本地、localhost。
+case "${PUBLIC_BASE_URL}" in
+  http://10.*|https://10.*|\
+  http://192.168.*|https://192.168.*|\
+  http://172.1[6-9].*|https://172.1[6-9].*|\
+  http://172.2[0-9].*|https://172.2[0-9].*|\
+  http://172.3[01].*|https://172.3[01].*|\
+  http://localhost*|https://localhost*|\
+  http://127.*|https://127.*|\
+  http://169.254.*|https://169.254.*)
+    echo "❌ PUBLIC_BASE_URL 疑似内网/本机地址: ${PUBLIC_BASE_URL}"
+    echo "   公网部署必须填公网 IP 或域名,否则 CLI 收到的登录链接打不开。"
+    exit 1
+    ;;
+esac
 # ====================================
 
 SSH_OPTS="-p ${SSH_PORT} -o StrictHostKeyChecking=accept-new"
@@ -43,16 +63,48 @@ echo "==> 目标服务器: ${SSH_ADDR}:${SSH_PORT}${REMOTE_DIR}"
 echo "==> PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}"
 
 # ----------------------------------------------------------------------------
-# 1. 上传代码(排除不该上服务器的:node_modules/dist/.git/.env 本地凭证等)
+# 0. 本地预构建产物(避免在服务器上跑 tsc/next build 把低配服务器卡死)。
+#
+#    旧版 deploy.sh 在服务器上 docker build 全量构建(装 devDeps + tsc + next build),
+#    三个镜像各吃一遍内存,低配服务器直接 OOM 卡死。改为:本地先 build 出
+#    dist/ + .next/standalone,上传后服务器只用 Dockerfile.*.prebuilt 装运行时
+#    依赖 + 拷产物(不跑编译),内存占用降 80%+。
 # ----------------------------------------------------------------------------
 if [ "${RESTART_ONLY:-0}" != "1" ]; then
-  echo "==> [1/6] 上传代码..."
+  echo "==> [0/7] 本地构建产物(避免服务器编译卡死)..."
+  (
+    cd "$(pwd)"
+    pnpm install --frozen-lockfile
+    pnpm build
+  )
+  # 校验关键产物存在,缺失则中止(不要把残缺产物传上去)
+  for f in \
+    packages/shared/dist/index.js \
+    packages/db/dist/index.js \
+    apps/server/dist/index.js \
+    apps/company-mock/dist/index.js \
+    apps/admin-web/.next/standalone/apps/admin-web/server.js
+  do
+    if [ ! -f "$f" ]; then
+      echo "❌ 本地构建产物缺失: $f"
+      echo "   请检查 pnpm build 是否成功(turbo 可能因某包报错中断)。"
+      exit 1
+    fi
+  done
+  echo "    ✅ 本地构建产物完整(dist/ + .next/standalone 已就绪)"
+fi
+
+# ----------------------------------------------------------------------------
+# 1. 上传代码 + 预构建产物。
+#    注意:不再排除 dist/ 和 .next/ —— 它们是 prebuilt 镜像需要的输入。
+#    仍排除 node_modules(平台不同,服务器按需重装)、.git、.env(本地凭证)等。
+# ----------------------------------------------------------------------------
+if [ "${RESTART_ONLY:-0}" != "1" ]; then
+  echo "==> [1/7] 上传代码 + 构建产物..."
   TMP_TAR="/tmp/auth-proxy-deploy.tar.gz"
   tar czf "${TMP_TAR}" \
     --exclude='node_modules' \
     --exclude='*/node_modules' \
-    --exclude='*/dist' \
-    --exclude='*/.next' \
     --exclude='*/.turbo' \
     --exclude='.turbo' \
     --exclude='.git' \
@@ -66,7 +118,7 @@ if [ "${RESTART_ONLY:-0}" != "1" ]; then
   scp -P ${SSH_PORT} -o StrictHostKeyChecking=accept-new "${TMP_TAR}" "${SSH_ADDR}:/tmp/auth-proxy-deploy.tar.gz"
   rm -f "${TMP_TAR}"
 else
-  echo "==> [1/5] RESTART_ONLY=1,跳过上传"
+  echo "==> [1/7] RESTART_ONLY=1,跳过上传"
 fi
 
 # ----------------------------------------------------------------------------
@@ -75,7 +127,7 @@ fi
 #    把"生成密钥"的逻辑整体放到一个独立的远程脚本里(quoted heredoc,
 #    不在本地做任何变量展开),所有 $(openssl...) 在远程 shell 执行。
 # ----------------------------------------------------------------------------
-echo "==> [2/6] 准备 .env(首次自动生成密钥)..."
+echo "==> [2/7] 准备 .env(首次自动生成密钥)..."
 # 把本地控制变量通过 ssh 的环境传到远程 shell(单引号防本地再展开),
 # 远程的 quoted heredoc 里用 \$PUBLIC_BASE_URL / \$FORCE_NEW_SECRETS 读取。
 ssh ${SSH_OPTS} "${SSH_ADDR}" \
@@ -132,8 +184,29 @@ else
   fi
 fi
 
+# 纠正:旧部署的 .env 里 PUBLIC_BASE_URL 可能是内网地址(hostname -I 推导出来的)。
+# 若是内网,用本次传入的公网值覆盖,确保 verification_uri 指向公网可达地址。
+PUBLIC_BASE_URL_VALUE="${PUBLIC_BASE_URL}"
+if [ -f .env ] && grep -q '^PUBLIC_BASE_URL=' .env; then
+  CUR_PBU=$(grep '^PUBLIC_BASE_URL=' .env | cut -d= -f2-)
+  case "$CUR_PBU" in
+    http://10.*|https://10.*|\
+    http://192.168.*|https://192.168.*|\
+    http://172.1[6-9].*|https://172.1[6-9].*|\
+    http://172.2[0-9].*|https://172.2[0-9].*|\
+    http://172.3[01].*|https://172.3[01].*|\
+    http://localhost*|https://localhost*|\
+    http://127.*|https://127.*|\
+    http://169.254.*|https://169.254.*)
+      echo "    ⚠️  检测到 .env 里 PUBLIC_BASE_URL 是内网地址($CUR_PBU),纠正为公网值"
+      sed -i "s|^PUBLIC_BASE_URL=.*|PUBLIC_BASE_URL=${PUBLIC_BASE_URL_VALUE}|" .env
+      chmod 600 .env
+      ;;
+  esac
+fi
+
 # 校验 .env 含必需变量(不含 admin 凭证 —— 那由数据库管理,手动 create-admin 创建)
-for v in ADMIN_SESSION_SECRET POSTGRES_PASSWORD; do
+for v in ADMIN_SESSION_SECRET POSTGRES_PASSWORD PUBLIC_BASE_URL; do
   val=$(grep "^${v}=" .env | cut -d= -f2-)
   if [ -z "$val" ]; then
     echo "    ❌ .env 缺少或为空: $v"
@@ -150,22 +223,30 @@ echo "    ✅ .env 校验通过"
 REMOTE_SCRIPT
 
 # ----------------------------------------------------------------------------
-# 3. 从源码构建镜像 + 校验 compose 配置
+# 3. 用本地预构建产物在服务器上构建镜像(超轻量:只装 prod 依赖 + 拷产物,不跑编译)。
 #
-#    注:docker-compose.yml 默认用 ghcr.io 预构建镜像(CI 模式)。本应急脚本
-#    在服务器上从源码构建,标记成 compose 期望的镜像名,使 GH_OWNER/IMAGE_TAG
-#    解析后等于本地 tag → docker compose up 直接用本地镜像,不拉 ghcr。
+#    与旧版的区别:旧版在服务器上跑 Dockerfile.*(装 devDeps + tsc + next build),
+#    低配服务器 OOM 卡死。现在用 Dockerfile.*.prebuilt:
+#      - server/company-mock: pnpm install --prod + COPY dist/
+#      - admin-web: 直接 COPY .next/standalone(零安装)
+#    内存占用极低,构建秒级完成。
 # ----------------------------------------------------------------------------
-echo "==> [3/6] 构建镜像(从源码)..."
+echo "==> [3/7] 构建镜像(用本地预构建产物,服务器轻量构建)..."
 ssh ${SSH_OPTS} "${SSH_ADDR}" 'bash -s' <<'REMOTE_SCRIPT'
 set -euo pipefail
 cd /opt/auth-proxy
 GH_OWNER="renxqoo"
 TAG="latest"
+# 先校验本地构建产物已上传到位(防上传步骤被跳过/失败)
+for f in packages/shared/dist/index.js apps/server/dist/index.js \
+         apps/company-mock/dist/index.js \
+         apps/admin-web/.next/standalone/apps/admin-web/server.js; do
+  [ -f "$f" ] || { echo "❌ 服务器上缺失预构建产物: $f"; exit 1; }
+done
 # 构建三个应用镜像,tag 与 compose 的 image: 字段一致
-docker build -f Dockerfile.server -t ghcr.io/${GH_OWNER}/auth-proxy/server:${TAG} .
-docker build -f Dockerfile.company-mock -t ghcr.io/${GH_OWNER}/auth-proxy/company-mock:${TAG} .
-docker build -f Dockerfile.admin-web -t ghcr.io/${GH_OWNER}/auth-proxy/admin-web:${TAG} .
+docker build -f Dockerfile.server.prebuilt -t ghcr.io/${GH_OWNER}/auth-proxy/server:${TAG} .
+docker build -f Dockerfile.company-mock.prebuilt -t ghcr.io/${GH_OWNER}/auth-proxy/company-mock:${TAG} .
+docker build -f Dockerfile.admin-web.prebuilt -t ghcr.io/${GH_OWNER}/auth-proxy/admin-web:${TAG} .
 # 校验 compose 配置(env 缺失会被 ${VAR:?} 拒绝)
 GH_OWNER=${GH_OWNER} IMAGE_TAG=${TAG} docker compose config >/dev/null
 REMOTE_SCRIPT
@@ -173,7 +254,7 @@ REMOTE_SCRIPT
 # ----------------------------------------------------------------------------
 # 4. 启动(migrate 自动跑一次,然后起 server)
 # ----------------------------------------------------------------------------
-echo "==> [4/6] 启动服务..."
+echo "==> [4/7] 启动服务..."
 ssh ${SSH_OPTS} "${SSH_ADDR}" 'bash -s' <<'REMOTE_SCRIPT'
 set -euo pipefail
 cd /opt/auth-proxy
@@ -185,7 +266,7 @@ REMOTE_SCRIPT
 # ----------------------------------------------------------------------------
 # 5. 健康检查(轮询直到 200 或超时)
 # ----------------------------------------------------------------------------
-echo "==> [5/6] 健康检查..."
+echo "==> [5/7] 健康检查..."
 HEALTH_OK=0
 for i in $(seq 1 30); do
   CODE=$(ssh ${SSH_OPTS} "${SSH_ADDR}" "curl -s -o /dev/null -w '%{http_code}' http://localhost:80/" 2>/dev/null || echo "000")
@@ -207,7 +288,7 @@ fi
 # ----------------------------------------------------------------------------
 # 6. 安装运维 cron(定时备份 + 健康巡检)。幂等:已存在则更新,不重复添加。
 # ----------------------------------------------------------------------------
-echo "==> [6/6] 安装运维 cron(备份 03:00 / 巡检每 5 分钟)..."
+echo "==> [6/7] 安装运维 cron(备份 03:00 / 巡检每 5 分钟)..."
 ssh ${SSH_OPTS} "${SSH_ADDR}" 'bash -s' <<'REMOTE_SCRIPT'
 set -euo pipefail
 REMOTE_DIR="/opt/auth-proxy"
@@ -247,10 +328,10 @@ REMOTE_SCRIPT
 
 echo ""
 echo "✅ 部署完成!"
-echo "   中间层:  http://${SSH_HOST}/"
-echo "   jwks:    http://${SSH_HOST}/.well-known/jwks.json"
-echo "   admin:   http://${SSH_HOST}/admin/login"
-echo "   CLI prod baseUrl = http://${SSH_HOST}"
+echo "   中间层:  ${PUBLIC_BASE_URL}/"
+echo "   jwks:    ${PUBLIC_BASE_URL}/.well-known/jwks.json"
+echo "   admin:   ${PUBLIC_BASE_URL}/admin/login"
+echo "   CLI prod baseUrl = ${PUBLIC_BASE_URL}"
 
 # ----------------------------------------------------------------------------
 # 检查是否已有 admin 账号;没有则提示手动创建(seed 不再创建任何 admin)。

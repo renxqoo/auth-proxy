@@ -1,0 +1,34 @@
+# syntax=docker/dockerfile:1
+# company-mock 镜像(应急部署用)——本地已预构建 dist/,服务器只装 prod 依赖 + 拷产物。
+#
+# 与 Dockerfile.company-mock 的区别:
+#   Dockerfile.company-mock            ——CI 用,从源码完整 build
+#   Dockerfile.company-mock.prebuilt   ——deploy.sh 用,本地已 build 好,服务器轻量构建
+#
+# 详见 Dockerfile.server.prebuilt 的说明(同样的设计动机)。
+
+FROM node:22-slim
+WORKDIR /app
+ENV NODE_ENV=production
+
+ARG COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
+ENV COREPACK_NPM_REGISTRY=${COREPACK_NPM_REGISTRY}
+RUN corepack enable && corepack prepare pnpm@11.1.2 --activate
+
+# frozen-lockfile 校验需全 workspace 成员的 package.json 在场
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/shared/package.json packages/shared/
+COPY packages/db/package.json packages/db/
+COPY apps/company-mock/package.json apps/company-mock/
+COPY apps/server/package.json apps/server/
+COPY apps/admin-web/package.json apps/admin-web/
+RUN pnpm install --frozen-lockfile --prod
+
+# 拷预构建产物
+COPY packages/shared/dist/ ./packages/shared/dist/
+COPY apps/company-mock/dist/ ./apps/company-mock/dist/
+
+ENV MOCK_PORT=4000
+EXPOSE 4000
+
+CMD ["node", "apps/company-mock/dist/index.js"]

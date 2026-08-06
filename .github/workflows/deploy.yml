@@ -3,6 +3,9 @@ name: Deploy
 # 手动触发:去 Actions 页面点 "Run workflow"。
 # 会 SSH 到服务器拉取最新镜像并重启。
 # 需要配 Secrets: DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY / DEPLOY_PORT(可选)
+# 必填 input: public_base_url —— 对外公网地址(拼 verification_uri 用)。
+#   ⚠️ 不能用 hostname -I 推导:云服务器上它返回内网 IP(如 172.24.x.x),
+#   会导致 CLI 收到的登录链接指向内网、公网打不开。
 # 可选: DEPLOY_ADMIN_PASSWORD —— 首次部署时用它作为 admin 初始密码(推荐,避免随机密码进日志)。
 #      不配则随机生成,写入服务器 .env 并用 ::add-mask:: 打码,明文不打印。
 "on":
@@ -13,10 +16,16 @@ name: Deploy
         required: false
         default: latest
         type: string
+      public_base_url:
+        description: "对外公网地址(必填,如 http://1.2.3.4 或 https://auth.example.com)。勿填内网 IP。"
+        required: true
+        type: string
 
 env:
   REMOTE_DIR: /opt/auth-proxy
   ADMIN_PASSWORD: ${{ secrets.DEPLOY_ADMIN_PASSWORD || '' }}
+  # 把 workflow input 映射成环境变量,经 ssh-action 的 envs 传到服务器脚本
+  PUBLIC_BASE_URL_INPUT: ${{ inputs.public_base_url }}
 
 jobs:
   deploy:
@@ -42,14 +51,32 @@ jobs:
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.DEPLOY_PORT || 22 }}
-          envs: REMOTE_DIR, ADMIN_PASSWORD
+          envs: REMOTE_DIR, ADMIN_PASSWORD, PUBLIC_BASE_URL_INPUT
           script: |
             set -euo pipefail
             cd "$REMOTE_DIR"
             chmod +x ops/*.sh 2>/dev/null || true
 
+            # ---------- PUBLIC_BASE_URL:从 workflow input 读,校验非内网 ----------
+            # 不再用 hostname -I 推导(云服务器返回内网 IP,导致 verification_uri 指向内网)。
+            PUBLIC_BASE_URL="${PUBLIC_BASE_URL_INPUT}"
+            if [ -z "$PUBLIC_BASE_URL" ]; then
+              echo "❌ public_base_url input 未填"; exit 1
+            fi
+            case "$PUBLIC_BASE_URL" in
+              http://10.*|https://10.*|\
+              http://192.168.*|https://192.168.*|\
+              http://172.1[6-9].*|https://172.1[6-9].*|\
+              http://172.2[0-9].*|https://172.2[0-9].*|\
+              http://172.3[01].*|https://172.3[01].*|\
+              http://localhost*|https://localhost*|\
+              http://127.*|https://127.*|\
+              http://169.254.*|https://169.254.*)
+                echo "❌ PUBLIC_BASE_URL 疑似内网/本机地址: $PUBLIC_BASE_URL"
+                echo "   公网部署必须填公网 IP 或域名。"; exit 1 ;;
+            esac
+
             # ---------- .env 管理(首次生成 + 增量补全,保留已有密钥)----------
-            PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-http://$(hostname -I | awk '{print $1}')}"
             if [ ! -f .env ]; then
               echo "首次部署:生成 .env + 强随机密钥"
               SEC_ADMIN_SESSION=$(openssl rand -hex 32)
@@ -76,8 +103,27 @@ jobs:
             else
               echo ".env 已存在,保留现有密钥"
             fi
+            # 纠正:旧部署可能写入内网 PUBLIC_BASE_URL(hostname -I 时代的残留),
+            # 用本次传入的公网值覆盖,确保 CLI 收到的链接指向公网。
+            if grep -q '^PUBLIC_BASE_URL=' .env; then
+              CUR_PBU=$(grep '^PUBLIC_BASE_URL=' .env | cut -d= -f2-)
+              case "$CUR_PBU" in
+                http://10.*|https://10.*|\
+                http://192.168.*|https://192.168.*|\
+                http://172.1[6-9].*|https://172.1[6-9].*|\
+                http://172.2[0-9].*|https://172.2[0-9].*|\
+                http://172.3[01].*|https://172.3[01].*|\
+                http://localhost*|https://localhost*|\
+                http://127.*|https://127.*|\
+                http://169.254.*|https://169.254.*)
+                  echo "⚠️  检测到 .env 里 PUBLIC_BASE_URL 是内网地址($CUR_PBU),纠正为公网值"
+                  sed -i "s|^PUBLIC_BASE_URL=.*|PUBLIC_BASE_URL=$PUBLIC_BASE_URL|" .env
+                  chmod 600 .env
+                  ;;
+              esac
+            fi
             # 校验必需变量
-            for v in ADMIN_SESSION_SECRET POSTGRES_PASSWORD ADMIN_USERNAME ADMIN_PASSWORD; do
+            for v in ADMIN_SESSION_SECRET POSTGRES_PASSWORD ADMIN_USERNAME ADMIN_PASSWORD PUBLIC_BASE_URL; do
               val=$(grep "^${v}=" .env | cut -d= -f2-)
               [ -z "$val" ] && { echo "❌ .env 缺少: $v"; exit 1; }
             done
