@@ -3,13 +3,14 @@ name: Deploy
 # 手动触发:去 Actions 页面点 "Run workflow"。
 # 会 SSH 到服务器拉取最新镜像并重启。
 # 需要配 Secrets: DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY / DEPLOY_PORT(可选)
-on:
+"on":
   workflow_dispatch:
     inputs:
       image_tag:
         description: "镜像 tag(默认 latest;填 git sha 前 7 位可回滚到指定版本)"
         required: false
         default: latest
+        type: string
 
 env:
   REMOTE_DIR: /opt/auth-proxy
