@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, count } from "drizzle-orm";
 import { admins } from "@auth-proxy/db";
 import { getDb } from "../infra.js";
 import { hashSecret, verifySecret } from "./appRepo.js";
@@ -110,6 +110,31 @@ export class AdminRepo {
     const rows = await db
       .update(admins)
       .set({ password: hashSecret(password) })
+      .where(eq(admins.id, id))
+      .returning({ id: admins.id });
+    return rows.length > 0;
+  }
+
+  /**
+   * 管理员总数。用于删除时的"至少保留一个"保护。
+   * 返回数值;空表返回 0。
+   */
+  async count(): Promise<number> {
+    const db = getDb();
+    const rows = await db.select({ count: count() }).from(admins);
+    // drizzle pg 返回 count 为字符串(避免大数精度),显式 Number 化
+    return Number(rows[0]?.count ?? 0);
+  }
+
+  /**
+   * 改用户名(不 hash)。唯一约束冲突由路由层 try/catch 捕获 → 转 409。
+   * 返回 false 表示 id 不存在。
+   */
+  async setUsername(id: number, username: string): Promise<boolean> {
+    const db = getDb();
+    const rows = await db
+      .update(admins)
+      .set({ username })
       .where(eq(admins.id, id))
       .returning({ id: admins.id });
     return rows.length > 0;

@@ -22,6 +22,9 @@ const mockAdminRepo = {
   create: vi.fn(),
   delete: vi.fn(async () => true),
   setPassword: vi.fn(async () => true),
+  count: vi.fn(async () => 2),
+  setUsername: vi.fn(async () => true),
+  findByUsername: vi.fn(),
 };
 const mockTokenRepo = { list: vi.fn(async () => []), revoke: vi.fn(), create: vi.fn() };
 const mockAppRepo = { list: vi.fn(async () => []), findById: vi.fn(), delete: vi.fn(async () => true) };
@@ -299,5 +302,213 @@ describe("E. 错误信息不泄露内部细节", () => {
     expect(JSON.stringify(body)).not.toContain("duplicate key");
     expect(JSON.stringify(body)).not.toContain("constraint");
     expect(JSON.stringify(body)).not.toContain("SQL");
+  });
+});
+
+describe("F. 删除管理员 —— 至少保留一个", () => {
+  it("仅剩 1 个管理员时 → 400(防删光后无人能登录)", async () => {
+    const { issueSessionCookieValue } = await import(
+      "../src/middleware/adminSession.js"
+    );
+    const cookie = issueSessionCookieValue(1, "admin");
+    mockAdminRepo.count.mockResolvedValueOnce(1);
+    const r = await adminRequest("/admins/2", {
+      method: "DELETE",
+      headers: { cookie: `admin_session=${cookie}` },
+    });
+    expect(r.status).toBe(400);
+    const body = await json(r);
+    expect(body.error_description).toBe("至少保留一个管理员");
+    expect(mockAdminRepo.delete).not.toHaveBeenCalled();
+  });
+
+  it("多个管理员时 → 删除成功", async () => {
+    const { issueSessionCookieValue } = await import(
+      "../src/middleware/adminSession.js"
+    );
+    const cookie = issueSessionCookieValue(1, "admin");
+    mockAdminRepo.count.mockResolvedValueOnce(3);
+    const r = await adminRequest("/admins/2", {
+      method: "DELETE",
+      headers: { cookie: `admin_session=${cookie}` },
+    });
+    expect(r.status).toBe(200);
+    expect(mockAdminRepo.delete).toHaveBeenCalledWith(2);
+  });
+});
+
+describe("G. 改密码 —— 改自己须验旧密码,改他人不需要", () => {
+  it("改自己但缺 oldPassword → 400", async () => {
+    const { issueSessionCookieValue } = await import(
+      "../src/middleware/adminSession.js"
+    );
+    const cookie = issueSessionCookieValue(1, "admin");
+    const r = await adminRequest("/admins/1/password", {
+      method: "POST",
+      headers: { cookie: `admin_session=${cookie}` },
+      body: JSON.stringify({ newPassword: "newpw123" }),
+    });
+    expect(r.status).toBe(400);
+    expect(String(await json(r).then((b) => b.error_description))).toContain(
+      "oldPassword",
+    );
+    expect(mockAdminRepo.setPassword).not.toHaveBeenCalled();
+  });
+
+  it("改自己且旧密码错 → 401", async () => {
+    const { issueSessionCookieValue } = await import(
+      "../src/middleware/adminSession.js"
+    );
+    const cookie = issueSessionCookieValue(1, "admin");
+    mockAdminRepo.verifyPassword.mockResolvedValueOnce(null);
+    const r = await adminRequest("/admins/1/password", {
+      method: "POST",
+      headers: { cookie: `admin_session=${cookie}` },
+      body: JSON.stringify({
+        oldPassword: "wrong",
+        newPassword: "newpw123",
+      }),
+    });
+    expect(r.status).toBe(401);
+    const body = await json(r);
+    expect(body.error_description).toBe("旧密码不正确");
+    expect(mockAdminRepo.setPassword).not.toHaveBeenCalled();
+  });
+
+  it("改自己且旧密码对 → 200", async () => {
+    const { issueSessionCookieValue } = await import(
+      "../src/middleware/adminSession.js"
+    );
+    const cookie = issueSessionCookieValue(1, "admin");
+    mockAdminRepo.verifyPassword.mockResolvedValueOnce({
+      id: 1,
+      username: "admin",
+      createdAt: new Date(),
+    });
+    const r = await adminRequest("/admins/1/password", {
+      method: "POST",
+      headers: { cookie: `admin_session=${cookie}` },
+      body: JSON.stringify({
+        oldPassword: "correct",
+        newPassword: "newpw123",
+      }),
+    });
+    expect(r.status).toBe(200);
+    expect(mockAdminRepo.setPassword).toHaveBeenCalledWith(1, "newpw123");
+  });
+
+  it("改他人密码(不带 oldPassword)→ 200", async () => {
+    const { issueSessionCookieValue } = await import(
+      "../src/middleware/adminSession.js"
+    );
+    const cookie = issueSessionCookieValue(1, "admin");
+    const r = await adminRequest("/admins/2/password", {
+      method: "POST",
+      headers: { cookie: `admin_session=${cookie}` },
+      body: JSON.stringify({ newPassword: "resetpw" }),
+    });
+    expect(r.status).toBe(200);
+    expect(mockAdminRepo.setPassword).toHaveBeenCalledWith(2, "resetpw");
+    // 改他人不应校验旧密码
+    expect(mockAdminRepo.verifyPassword).not.toHaveBeenCalled();
+  });
+
+  it("超长 newPassword → 400(防 DoS)", async () => {
+    const { issueSessionCookieValue } = await import(
+      "../src/middleware/adminSession.js"
+    );
+    const cookie = issueSessionCookieValue(1, "admin");
+    const huge = "x".repeat(10 * 1024 * 1024);
+    const r = await adminRequest("/admins/2/password", {
+      method: "POST",
+      headers: { cookie: `admin_session=${cookie}` },
+      body: JSON.stringify({ newPassword: huge }),
+    });
+    expect(r.status).toBe(400);
+    expect(mockAdminRepo.setPassword).not.toHaveBeenCalled();
+  });
+});
+
+describe("H. 改用户名 —— 冲突 409,改自己重发 cookie", () => {
+  it("改用户名成功 → 200 + 返回新名", async () => {
+    const { issueSessionCookieValue } = await import(
+      "../src/middleware/adminSession.js"
+    );
+    const cookie = issueSessionCookieValue(1, "admin");
+    const r = await adminRequest("/admins/2/rename", {
+      method: "POST",
+      headers: { cookie: `admin_session=${cookie}` },
+      body: JSON.stringify({ username: "newname" }),
+    });
+    expect(r.status).toBe(200);
+    const body = await json(r);
+    expect(body.username).toBe("newname");
+    expect(mockAdminRepo.setUsername).toHaveBeenCalledWith(2, "newname");
+  });
+
+  it("改用户名冲突 → 409 + 通用消息(不泄露 SQL)", async () => {
+    const { issueSessionCookieValue } = await import(
+      "../src/middleware/adminSession.js"
+    );
+    const cookie = issueSessionCookieValue(1, "admin");
+    mockAdminRepo.setUsername.mockRejectedValueOnce(
+      new Error('duplicate key value violates unique constraint "admins_username_key"'),
+    );
+    const r = await adminRequest("/admins/2/rename", {
+      method: "POST",
+      headers: { cookie: `admin_session=${cookie}` },
+      body: JSON.stringify({ username: "dup" }),
+    });
+    expect(r.status).toBe(409);
+    const body = await json(r);
+    expect(body.error_description).toBe("用户名已存在");
+    expect(JSON.stringify(body)).not.toContain("duplicate key");
+    expect(JSON.stringify(body)).not.toContain("constraint");
+  });
+
+  it("改自己用户名 → 重发 cookie(Set-Cookie 存在)", async () => {
+    const { issueSessionCookieValue } = await import(
+      "../src/middleware/adminSession.js"
+    );
+    const cookie = issueSessionCookieValue(1, "admin");
+    const r = await adminRequest("/admins/1/rename", {
+      method: "POST",
+      headers: { cookie: `admin_session=${cookie}` },
+      body: JSON.stringify({ username: "renamed-me" }),
+    });
+    expect(r.status).toBe(200);
+    // 改自己应重发 cookie 刷新 payload 里的 username
+    const setCookie = r.headers.get("set-cookie");
+    expect(setCookie).toBeTruthy();
+    expect(setCookie).toContain("admin_session=");
+  });
+
+  it("改他人用户名 → 不重发自己 cookie", async () => {
+    const { issueSessionCookieValue } = await import(
+      "../src/middleware/adminSession.js"
+    );
+    const cookie = issueSessionCookieValue(1, "admin");
+    const r = await adminRequest("/admins/2/rename", {
+      method: "POST",
+      headers: { cookie: `admin_session=${cookie}` },
+      body: JSON.stringify({ username: "someone-else" }),
+    });
+    expect(r.status).toBe(200);
+    // 改他人不应动自己的 cookie
+    expect(r.headers.get("set-cookie")).toBeNull();
+  });
+
+  it("空 username → 400", async () => {
+    const { issueSessionCookieValue } = await import(
+      "../src/middleware/adminSession.js"
+    );
+    const cookie = issueSessionCookieValue(1, "admin");
+    const r = await adminRequest("/admins/2/rename", {
+      method: "POST",
+      headers: { cookie: `admin_session=${cookie}` },
+      body: JSON.stringify({ username: "   " }),
+    });
+    expect(r.status).toBe(400);
+    expect(mockAdminRepo.setUsername).not.toHaveBeenCalled();
   });
 });

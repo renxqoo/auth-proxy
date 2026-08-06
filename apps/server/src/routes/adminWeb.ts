@@ -37,7 +37,9 @@ import { config } from "../config.js";
  *   GET    /admin/web/audit/api      → API 调用审计
  *   GET    /admin/web/admins         → 管理员列表
  *   POST   /admin/web/admins         → 创建管理员 { username, password }
- *   DELETE /admin/web/admins/:id     → 删除管理员
+ *   POST   /admin/web/admins/:id/password → 改密码(改自己须带 oldPassword)
+ *   POST   /admin/web/admins/:id/rename   → 改用户名(改自己后重发 cookie)
+ *   DELETE /admin/web/admins/:id     → 删除管理员(至少保留一个;不能删自己)
  */
 
 // session 注入到 context 的类型
@@ -260,13 +262,128 @@ adminWeb.post("/admins", async (c) => {
   }
 });
 
+// 改密码:
+//   - 改自己(id === 当前 admin):必须带 oldPassword 校验通过(防盗号洗号)
+//   - 改他人:直接设新密码(管理员重置场景,不需旧密码)
+adminWeb.post("/admins/:id/password", async (c) => {
+  const id = Number(c.req.param("id"));
+  const s = c.get("adminSession");
+  const body = await c.req.json().catch(() => null);
+  const newPassword =
+    typeof body?.newPassword === "string" ? body.newPassword : "";
+  const oldPassword =
+    typeof body?.oldPassword === "string" ? body.oldPassword : "";
+  if (!newPassword) {
+    return c.json(
+      {
+        error: "invalid_request",
+        error_description: "newPassword required",
+      },
+      400,
+    );
+  }
+  // 长度上限(同 login,防 DoS + 防 DB 超长值)
+  if (
+    newPassword.length > MAX_PASSWORD_LEN ||
+    oldPassword.length > MAX_PASSWORD_LEN
+  ) {
+    return c.json(
+      {
+        error: "invalid_request",
+        error_description: "password too long",
+      },
+      400,
+    );
+  }
+  // 改自己:必须验证旧密码(复用 verifyPassword,含 timing 抹平)
+  if (id === s.adminId) {
+    if (!oldPassword) {
+      return c.json(
+        {
+          error: "invalid_request",
+          error_description: "修改自己的密码需要 oldPassword",
+        },
+        400,
+      );
+    }
+    const verified = await getAdminRepo().verifyPassword(
+      s.username,
+      oldPassword,
+    );
+    if (!verified) {
+      return c.json(
+        { error: "invalid_credentials", error_description: "旧密码不正确" },
+        401,
+      );
+    }
+  }
+  const ok = await getAdminRepo().setPassword(id, newPassword);
+  return ok ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
+});
+
+// 改用户名:
+//   - 唯一约束冲突 → 409 用户名已存在(不泄露 SQL 细节)
+//   - 改自己后重发 cookie:cookie payload 含 username,否则 /me 显示旧名
+adminWeb.post("/admins/:id/rename", async (c) => {
+  const id = Number(c.req.param("id"));
+  const s = c.get("adminSession");
+  const body = await c.req.json().catch(() => null);
+  const username =
+    typeof body?.username === "string" ? body.username.trim() : "";
+  if (!username) {
+    return c.json(
+      { error: "invalid_request", error_description: "username required" },
+      400,
+    );
+  }
+  if (username.length > MAX_USERNAME_LEN) {
+    return c.json(
+      {
+        error: "invalid_request",
+        error_description: "username too long",
+      },
+      400,
+    );
+  }
+  try {
+    const ok = await getAdminRepo().setUsername(id, username);
+    if (!ok) return c.json({ error: "not_found" }, 404);
+    // 改自己:重发 cookie 刷新 payload 里的 username
+    if (id === s.adminId) {
+      const value = issueSessionCookieValue(s.adminId, username);
+      setCookie(c, COOKIE_NAME, value, {
+        httpOnly: true,
+        sameSite: "Lax",
+        path: "/",
+        maxAge: config.adminSessionTtlSec,
+        secure: config.tls.enabled,
+      });
+    }
+    return c.json({ ok: true, username });
+  } catch (e) {
+    safeError("[admin] rename admin failed:", e);
+    return c.json(
+      { error: "conflict", error_description: "用户名已存在" },
+      409,
+    );
+  }
+});
+
 adminWeb.delete("/admins/:id", async (c) => {
   const id = Number(c.req.param("id"));
-  // 防自删:不能删自己
   const s = c.get("adminSession");
+  // 防自删:不能删自己
   if (s.adminId === id) {
     return c.json(
       { error: "invalid_request", error_description: "不能删除自己" },
+      400,
+    );
+  }
+  // 至少保留一个:删完无人能登录后台上
+  const total = await getAdminRepo().count();
+  if (total <= 1) {
+    return c.json(
+      { error: "invalid_request", error_description: "至少保留一个管理员" },
       400,
     );
   }

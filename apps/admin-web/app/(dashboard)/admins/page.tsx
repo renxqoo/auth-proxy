@@ -9,7 +9,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { CreateAdminDialog } from "./create-dialog";
-import { DeleteAdminButton } from "./delete-button";
+import { AdminActions } from "./admin-actions";
 
 interface AdminRow {
   id: number;
@@ -63,13 +63,12 @@ export default async function AdminsPage() {
                   {new Date(a.createdAt).toLocaleString("zh-CN")}
                 </TableCell>
                 <TableCell className="text-right">
-                  {a.id === me.id ? (
-                    <span className="text-xs text-muted-foreground">
-                      不能删除自己
-                    </span>
-                  ) : (
-                    <DeleteAdminButton id={a.id} />
-                  )}
+                  <AdminActions
+                    id={a.id}
+                    total={admins.length}
+                    isSelf={a.id === me.id}
+                    currentName={a.username}
+                  />
                 </TableCell>
               </TableRow>
             ))}
