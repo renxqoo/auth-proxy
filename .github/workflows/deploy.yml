@@ -3,6 +3,8 @@ name: Deploy
 # 手动触发:去 Actions 页面点 "Run workflow"。
 # 会 SSH 到服务器拉取最新镜像并重启。
 # 需要配 Secrets: DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY / DEPLOY_PORT(可选)
+# 可选: DEPLOY_ADMIN_PASSWORD —— 首次部署时用它作为 admin 初始密码(推荐,避免随机密码进日志)。
+#      不配则随机生成,写入服务器 .env 并用 ::add-mask:: 打码,明文不打印。
 "on":
   workflow_dispatch:
     inputs:
@@ -14,6 +16,7 @@ name: Deploy
 
 env:
   REMOTE_DIR: /opt/auth-proxy
+  ADMIN_PASSWORD: ${{ secrets.DEPLOY_ADMIN_PASSWORD || '' }}
 
 jobs:
   deploy:
@@ -22,7 +25,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Upload compose files to server
-        uses: appleboy/scp-action@v0.1.7
+        uses: appleboy/scp-action@v1.0.0
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
@@ -39,7 +42,7 @@ jobs:
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.DEPLOY_PORT || 22 }}
-          envs: REMOTE_DIR
+          envs: REMOTE_DIR, ADMIN_PASSWORD
           script: |
             set -euo pipefail
             cd "$REMOTE_DIR"
@@ -51,7 +54,12 @@ jobs:
               echo "首次部署:生成 .env + 强随机密钥"
               SEC_ADMIN_SESSION=$(openssl rand -hex 32)
               SEC_POSTGRES_PASSWORD=$(openssl rand -hex 16)
-              SEC_ADMIN_PASSWORD=$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-20)
+              if [ -n "${ADMIN_PASSWORD:-}" ]; then
+                SEC_ADMIN_PASSWORD="$ADMIN_PASSWORD"   # 来自 Secret,自动打码,不进日志
+              else
+                SEC_ADMIN_PASSWORD=$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-20)
+                echo "::add-mask::$SEC_ADMIN_PASSWORD" # 即使误打印也显示 ***
+              fi
               cat > .env <<EOF
             ADMIN_SESSION_SECRET=$SEC_ADMIN_SESSION
             POSTGRES_USER=auth-proxy
@@ -63,7 +71,8 @@ jobs:
             EOF
               chmod 600 .env
               echo "✅ .env 已生成"
-              echo "⚠️ admin 初始密码(登录后立即改): $SEC_ADMIN_PASSWORD"
+              echo "⚠️ admin 初始密码已写入服务器 $REMOTE_DIR/.env"
+              echo "   查看方式(SSH 到服务器): grep ADMIN_PASSWORD $REMOTE_DIR/.env"
             else
               echo ".env 已存在,保留现有密钥"
             fi
