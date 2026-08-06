@@ -1,0 +1,50 @@
+# syntax=docker/dockerfile:1
+# company-mock 镜像(测试用公司应用)。
+# 仅在 docker 内部网络暴露给 server,不对外。
+
+# ---------- stage 1: 全量依赖(供构建) ----------
+FROM node:22-slim AS deps
+WORKDIR /app
+# corepack 默认从 registry.npmjs.org 下载 pnpm,国内服务器会卡。
+# 指向淘宝镜像加速;prepare 提前下载并激活,避免 install 时才现下载。
+# 本地/海外构建可设 --build-arg COREPACK_NPM_REGISTRY= 覆盖回官方源。
+ARG COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
+ENV COREPACK_NPM_REGISTRY=${COREPACK_NPM_REGISTRY}
+RUN corepack enable && corepack prepare pnpm@11.1.2 --activate
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY tsconfig.base.json ./
+# frozen-lockfile 需全 workspace 成员的 package.json 在场以校验一致性
+COPY packages/shared/package.json packages/shared/
+COPY packages/db/package.json packages/db/
+COPY apps/company-mock/package.json apps/company-mock/
+COPY apps/server/package.json apps/server/
+COPY apps/admin-web/package.json apps/admin-web/
+RUN pnpm install --frozen-lockfile
+
+# ---------- stage 2: 构建 ----------
+# 只构建 company-mock 及其依赖(shared),"..." 含所有 workspace 依赖。
+FROM deps AS build
+COPY packages/shared/ packages/shared/
+COPY apps/company-mock/ apps/company-mock/
+RUN pnpm --filter @auth-proxy/company-mock... build
+
+# ---------- stage 3: 运行时 ----------
+FROM node:22-slim AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+ARG COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
+ENV COREPACK_NPM_REGISTRY=${COREPACK_NPM_REGISTRY}
+RUN corepack enable && corepack prepare pnpm@11.1.2 --activate
+
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/shared/package.json packages/shared/
+COPY apps/company-mock/package.json apps/company-mock/
+RUN pnpm install --frozen-lockfile --prod
+
+COPY --from=build /app/packages/shared/dist/ ./packages/shared/dist/
+COPY --from=build /app/apps/company-mock/dist/ ./apps/company-mock/dist/
+
+ENV MOCK_PORT=4000
+EXPOSE 4000
+
+CMD ["node", "apps/company-mock/dist/index.js"]

@@ -1,0 +1,113 @@
+name: Deploy
+
+# 手动触发:去 Actions 页面点 "Run workflow"。
+# 会 SSH 到服务器拉取最新镜像并重启。
+# 需要配 Secrets: DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY / DEPLOY_PORT(可选)
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "镜像 tag(默认 latest;填 git sha 前 7 位可回滚到指定版本)"
+        required: false
+        default: latest
+
+env:
+  REMOTE_DIR: /opt/auth-proxy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Upload compose files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          source: "docker-compose.yml,nginx.conf,ops/"
+          target: ${{ env.REMOTE_DIR }}
+          overwrite: true
+
+      - name: Pull images & deploy
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          envs: REMOTE_DIR
+          script: |
+            set -euo pipefail
+            cd "$REMOTE_DIR"
+            chmod +x ops/*.sh 2>/dev/null || true
+
+            # ---------- .env 管理(首次生成 + 增量补全,保留已有密钥)----------
+            PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-http://$(hostname -I | awk '{print $1}')}"
+            if [ ! -f .env ]; then
+              echo "首次部署:生成 .env + 强随机密钥"
+              SEC_ADMIN_SESSION=$(openssl rand -hex 32)
+              SEC_POSTGRES_PASSWORD=$(openssl rand -hex 16)
+              SEC_ADMIN_PASSWORD=$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-20)
+              cat > .env <<EOF
+            ADMIN_SESSION_SECRET=$SEC_ADMIN_SESSION
+            POSTGRES_USER=auth-proxy
+            POSTGRES_PASSWORD=$SEC_POSTGRES_PASSWORD
+            POSTGRES_DB=auth-proxy
+            ADMIN_USERNAME=admin
+            ADMIN_PASSWORD=$SEC_ADMIN_PASSWORD
+            PUBLIC_BASE_URL=$PUBLIC_BASE_URL
+            EOF
+              chmod 600 .env
+              echo "✅ .env 已生成"
+              echo "⚠️ admin 初始密码(登录后立即改): $SEC_ADMIN_PASSWORD"
+            else
+              echo ".env 已存在,保留现有密钥"
+            fi
+            # 校验必需变量
+            for v in ADMIN_SESSION_SECRET POSTGRES_PASSWORD ADMIN_USERNAME ADMIN_PASSWORD; do
+              val=$(grep "^${v}=" .env | cut -d= -f2-)
+              [ -z "$val" ] && { echo "❌ .env 缺少: $v"; exit 1; }
+            done
+
+            # ---------- 拉镜像 + 启动 ----------
+            IMAGE_TAG="${{ inputs.image_tag }}" docker compose pull
+            docker compose down
+            IMAGE_TAG="${{ inputs.image_tag }}" docker compose up -d
+
+            # ---------- 安装运维 cron(幂等)----------
+            mkdir -p /var/log
+            touch /var/log/auth-proxy-backup.log /var/log/auth-proxy-health.log 2>/dev/null || true
+            cat > /etc/cron.d/auth-proxy <<EOF
+            SHELL=/bin/bash
+            PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+            0 3 * * * root $REMOTE_DIR/ops/backup.sh >> /var/log/auth-proxy-backup.log 2>&1
+            */5 * * * * root $REMOTE_DIR/ops/healthcheck.sh >> /var/log/auth-proxy-health.log 2>&1
+            EOF
+            chmod 644 /etc/cron.d/auth-proxy
+            systemctl reload cron 2>/dev/null || systemctl reload crond 2>/dev/null || true
+            echo "✅ cron 已安装"
+
+      - name: Health check
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script: |
+            set -e
+            for i in $(seq 1 30); do
+              CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:80/ || echo 000)
+              if [ "$CODE" = "200" ]; then
+                echo "✅ 就绪 (HTTP 200, 第 $i 次探测)"
+                exit 0
+              fi
+              echo "等待中... HTTP $CODE ($i/30)"
+              sleep 3
+            done
+            echo "❌ 30 次探测未就绪,最近日志:"
+            cd ${{ env.REMOTE_DIR }} && docker compose logs --tail=40 server
+            exit 1

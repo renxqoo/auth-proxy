@@ -1,0 +1,67 @@
+# syntax=docker/dockerfile:1
+# 多阶段构建 auth-proxy 鉴权中间层(server)镜像。
+#
+# 本地验证(需 docker):
+#   docker build -t auth-proxy-server -f Dockerfile.server .
+#   docker compose up -d
+
+# ---------- stage 1: 全量依赖(含 devDependencies,供构建) ----------
+FROM node:22-slim AS deps
+WORKDIR /app
+# corepack 默认从 registry.npmjs.org 下载 pnpm,国内服务器会卡。
+# 指向淘宝镜像加速;prepare 提前下载并激活,避免 install 时才现下载。
+# 本地/海外构建可设 --build-arg COREPACK_NPM_REGISTRY= 覆盖回官方源。
+ARG COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
+ENV COREPACK_NPM_REGISTRY=${COREPACK_NPM_REGISTRY}
+RUN corepack enable && corepack prepare pnpm@11.1.2 --activate
+# 先拷 workspace 配置(利用层缓存)
+# 需拷所有 workspace 成员的 package.json:frozen-lockfile 要校验全 workspace 一致
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY tsconfig.base.json ./
+COPY packages/shared/package.json packages/shared/
+COPY packages/db/package.json packages/db/
+COPY apps/company-mock/package.json apps/company-mock/
+COPY apps/server/package.json apps/server/
+COPY apps/admin-web/package.json apps/admin-web/
+RUN pnpm install --frozen-lockfile
+
+# ---------- stage 2: 构建 ----------
+# 只构建 server 及其依赖链路(shared → db → server)。
+# --filter 的 "..." 表示"含其所有 workspace 依赖"。
+FROM deps AS build
+COPY turbo.json ./
+COPY packages/ packages/
+COPY apps/server/ apps/server/
+RUN pnpm --filter @auth-proxy/server... build
+# 确认 migrations 目录存在(运行时 migrate 用)
+RUN ls packages/db/migrations/meta/_journal.json
+
+# ---------- stage 3: 运行时(只装 prod 依赖) ----------
+FROM node:22-slim AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+ARG COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
+ENV COREPACK_NPM_REGISTRY=${COREPACK_NPM_REGISTRY}
+RUN corepack enable && corepack prepare pnpm@11.1.2 --activate
+
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/shared/package.json packages/shared/
+COPY packages/db/package.json packages/db/
+COPY apps/server/package.json apps/server/
+# server 只依赖 shared + db;--prod 只装运行时依赖
+RUN pnpm install --frozen-lockfile --prod
+
+# 拷构建产物 + 迁移文件(部署时跑 migrate 用)
+COPY --from=build /app/packages/shared/dist/ ./packages/shared/dist/
+COPY --from=build /app/packages/db/dist/ ./packages/db/dist/
+COPY --from=build /app/packages/db/migrations/ ./packages/db/migrations/
+COPY --from=build /app/apps/server/dist/ ./apps/server/dist/
+
+ENV SERVER_PORT=3000
+EXPOSE 3000
+
+# 健康检查(node fetch,不依赖 curl)
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD node -e "fetch('http://localhost:'+process.env.SERVER_PORT+'/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+CMD ["node", "apps/server/dist/index.js"]

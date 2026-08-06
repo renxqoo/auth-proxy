@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+.turbo/
+.next/
+.env
+.env.local
+# IDE / agent 本地数据(ZCode 会话计划等,纯本地,不公开)
+.zcode/

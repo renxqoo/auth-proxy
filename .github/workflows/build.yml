@@ -1,0 +1,56 @@
+name: Build & Push Images
+
+# push 到 main 自动构建三个镜像推 GHCR(public)。
+# 构建产物:ghcr.io/<owner>/auth-proxy/{server,admin-web,company-mock}:<sha>+latest
+# 部署是另一个 workflow(deploy.yml),手动触发,不在这里自动部署。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # 允许手动触发构建
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # 推 GHCR 需要的权限
+    strategy:
+      fail-fast: false # 一个镜像构建失败不取消其他
+      matrix:
+        include:
+          - dockerfile: Dockerfile.server
+            image: server
+          - dockerfile: Dockerfile.admin-web
+            image: admin-web
+          - dockerfile: Dockerfile.company-mock
+            image: company-mock
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set tags (git sha + latest)
+        id: meta
+        run: |
+          SHA="${GITHUB_SHA::7}"
+          OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "owner=$OWNER" >> $GITHUB_OUTPUT
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }} # 内置 token,无需配 secret
+
+      - name: Build and push ${{ matrix.image }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.owner }}/auth-proxy/${{ matrix.image }}:${{ steps.meta.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.owner }}/auth-proxy/${{ matrix.image }}:latest

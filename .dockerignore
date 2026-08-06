@@ -1,0 +1,44 @@
+# 全局 docker 构建上下文忽略项,对所有 Dockerfile.* 生效。
+#
+# 本项目部署 apps/ 下的应用(server/admin-web/company-mock),共享包在 packages/(shared/db)。
+# 各 Dockerfile 用 turbo --filter 只构建自己的依赖链路,
+# 这里只负责排除"任何镜像都不需要"的东西;某镜像需要的源码由该 Dockerfile 自己 COPY。
+#
+# 如需按镜像单独排除(如只给 server 排掉某目录),用 <Dockerfile 名>.dockerignore
+# (Docker ≥1.2 支持),例如 Dockerfile.server.dockerignore 只对 server 构建生效。
+
+node_modules
+**/node_modules
+**/dist
+**/.turbo
+.git
+*.log
+# 任何层级的环境变量文件(含 .env.example / .env.local 等),一律不进镜像
+**/.env
+**/.env.*
+.DS_Store
+docs
+deploy.sh
+
+# 测试相关:生产镜像不跑测试
+**/test
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+**/vitest.config.ts
+**/tsconfig.test.json
+**/coverage
+
+# 缓存与本地工具配置(镜像构建/运行都不需要)
+# .next 是 Next.js 本地构建产物,镜像内会重新 build,宿主产物不需要
+.next
+**/.next
+.next/cache
+**/.next/cache
+.oxlintrc.json
+# 本地开发工具配置(镜像不跑 lint / 不装 shadcn 组件)
+**/eslint.config.mjs
+**/components.json
+# IDE / agent 本地数据(ZCode 会话计划等,纯本地)
+.zcode
+.zcode/*

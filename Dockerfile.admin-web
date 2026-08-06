@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1
+# admin-web 镜像(Next.js standalone)。
+# 仅 docker 内部网络可见(nginx 代理 /admin → admin-web:3001)。
+
+# ---------- stage 1: 依赖 ----------
+FROM node:22-slim AS deps
+WORKDIR /app
+# corepack 默认从 registry.npmjs.org 下载 pnpm,国内服务器会卡。
+# 指向淘宝镜像加速;prepare 提前下载并激活,避免 install 时才现下载。
+# 本地/海外构建可设 --build-arg COREPACK_NPM_REGISTRY= 覆盖回官方源。
+ARG COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
+ENV COREPACK_NPM_REGISTRY=${COREPACK_NPM_REGISTRY}
+RUN corepack enable && corepack prepare pnpm@11.1.2 --activate
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY apps/admin-web/package.json apps/admin-web/
+# admin-web 不依赖 workspace 内其它包,只装自己
+RUN pnpm install --frozen-lockfile --filter admin-web...
+
+# ---------- stage 2: 构建 ----------
+FROM deps AS build
+COPY apps/admin-web/ apps/admin-web/
+WORKDIR /app/apps/admin-web
+# SERVER_BASE_URL 构建时用默认值;运行时同源代理(rewrites)用相对路径
+RUN pnpm build
+
+# ---------- stage 3: 运行时(standalone)----------
+FROM node:22-slim AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=3001
+ENV HOSTNAME=0.0.0.0
+
+# standalone 产物(server.js + 静态资源)
+COPY --from=build /app/apps/admin-web/.next/standalone ./
+COPY --from=build /app/apps/admin-web/.next/static ./apps/admin-web/.next/static
+COPY --from=build /app/apps/admin-web/public ./apps/admin-web/public
+
+EXPOSE 3001
+CMD ["node", "apps/admin-web/server.js"]

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oxc-project/oxc-project/main/npm/oxlint/configuration_schema.json",
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn",
+    "perf": "warn"
+  },
+  "rules": {
+    "no-console": "off"
+  },
+  "overrides": [
+    {
+      "files": ["apps/server/src/companyTokenRefresher.ts"],
+      "rules": {
+        "no-await-in-loop": "off"
+      }
+    },
+    {
+      "files": ["apps/server/src/routes/revoke.ts"],
+      "rules": {
+        "no-await-in-loop": "off"
+      }
+    }
+  ],
+  "ignorePatterns": ["**/dist/**", "**/node_modules/**"]
+}
