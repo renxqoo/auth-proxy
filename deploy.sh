@@ -12,12 +12,12 @@
 # 安全设计:
 #   - 服务器首次部署自动生成强随机"机器密钥"(ADMIN_SESSION_SECRET / POSTGRES_PASSWORD),
 #     写入 ${REMOTE_DIR}/.env 并持久化。后续部署不覆盖,密钥稳定。
-#   - admin 首个管理员凭证同样由首次部署随机生成(ADMIN_USERNAME 固定为 admin,
-#     ADMIN_PASSWORD 随机),写入 .env 并一次性打印。seed 仅在 admins 表空时用它创建
-#     一个管理员;之后改密码走 admin 后台,数据库为准。后续部署绝不覆盖你改过的密码。
+#   - admin 账号零默认:seed 不创建任何 admin,代码/脚本里没有任何默认 admin 凭证。
+#     首个管理员由部署者用 create-admin 脚本手动创建(交互式输入,密码不落盘)。
+#     这避免了公开仓库里 admin/admin123 之类的弱口令被利用的初始窗口。
 #   - 绝不自动删数据卷(避免丢你改过的数据/密码)。
-#   - .env 只存在于服务器,不上传、不进 git、不进镜像。
-#   - compose 用 ${VAR:?...} 强制校验:任何必需变量缺失则拒绝启动(防弱默认值)。
+#   - .env 只存在于服务器,不上传、不进 git、不进镜像,且不含任何 admin 密码。
+#   - compose 用 ${VAR:?...} 强制校验:机器密钥缺失则拒绝启动(防弱默认值)。
 #   - server 容器 NODE_ENV=production,启动时 assertProductionConfig() 二次校验。
 #
 # 用法:
@@ -102,12 +102,11 @@ fi
 
 if [ "$GEN_SECRETS" = "1" ]; then
   echo "    生成强随机密钥..."
-  # 机器级密钥(cookie HMAC / DB 密码)+ admin 首个管理员凭证。
-  # admin 用户名固定 admin,密码随机生成;seed 仅在 admins 表空时用它创建一次,
-  # 之后改密码走 admin 后台。部署绝不覆盖你改过的密码。
+  # 只生成机器级密钥(cookie HMAC / DB 密码)。
+  # 不生成 admin 密码 —— seed 不再创建任何 admin(代码零默认,避免公开仓库里的
+  # 弱口令被利用)。首个 admin 由部署者用 create-admin 脚本手动创建。
   SEC_ADMIN_SESSION=$(openssl rand -hex 32)
   SEC_POSTGRES_PASSWORD=$(openssl rand -hex 16)
-  SEC_ADMIN_PASSWORD=$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-20)
   {
     echo "# 由 deploy.sh 自动生成,勿手动编辑。重新生成用 FORCE_NEW_SECRETS=1 ./deploy.sh"
     echo "# admin session cookie HMAC 密钥(≥32 字节,防 cookie 伪造)"
@@ -116,43 +115,25 @@ if [ "$GEN_SECRETS" = "1" ]; then
     echo "POSTGRES_USER=auth-proxy"
     echo "POSTGRES_PASSWORD=${SEC_POSTGRES_PASSWORD}"
     echo "POSTGRES_DB=auth-proxy"
-    echo "# 首个管理员凭证(seed 仅在 admins 表空时创建一次;之后改密码走后台)"
-    echo "ADMIN_USERNAME=admin"
-    echo "ADMIN_PASSWORD=${SEC_ADMIN_PASSWORD}"
     echo "# 对外公网地址(拼 verification_uri,防 host header 注入钓鱼)"
     echo "PUBLIC_BASE_URL=${PUBLIC_BASE_URL}"
   } > .env
   chmod 600 .env
   echo "    ✅ .env 已生成(权限 600)"
-  echo "    ⚠️  首次部署 admin 初始凭证(登录后请立即改密码):"
-  echo "        username: admin"
-  echo "        password: ${SEC_ADMIN_PASSWORD}"
+  echo "    ℹ️  seed 不会创建 admin。部署后用 create-admin 脚本手动建第一个管理员(见部署结束提示)"
 else
   echo "    .env 已存在,保留现有密钥"
-  # 老环境升级:增量补全后来新增的必需变量(不动已有密钥)。
-  # 例:本次新增 ADMIN_USERNAME/ADMIN_PASSWORD,老 .env 里没有 → 补上随机值。
-  # 已存在的变量绝不覆盖(你改过的密码 / 旧 PG 密钥都安全)。
-  ENV_CHANGED=0
-  if ! grep -q '^ADMIN_USERNAME=' .env; then
-    echo "ADMIN_USERNAME=admin" >> .env
-    echo "    ➕ 补全 ADMIN_USERNAME=admin"
-    ENV_CHANGED=1
-  fi
-  if ! grep -q '^ADMIN_PASSWORD=' .env; then
-    SEC_ADMIN_PASSWORD_UPGRADE=$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-20)
-    echo "ADMIN_PASSWORD=${SEC_ADMIN_PASSWORD_UPGRADE}" >> .env
-    echo "    ➕ 补全 ADMIN_PASSWORD(随机生成)"
-    echo "    ℹ️  此密码仅在 admins 表为空时被 seed 使用。你的数据库已有管理员,"
-    echo "        seed 会跳过,不会改你现有账号。请继续用你原有的管理员密码登录。"
-    ENV_CHANGED=1
-  fi
-  if [ "$ENV_CHANGED" = "1" ]; then
+  # 老环境升级:若老 .env 里残留 ADMIN_USERNAME/ADMIN_PASSWORD(现已废弃,seed 不再读),
+  # 清掉避免误导(数据库里的 admin 密码为准,不靠 .env)。
+  if grep -q '^ADMIN_USERNAME=\|^ADMIN_PASSWORD=' .env; then
+    echo "    🧹 清理 .env 里废弃的 ADMIN_USERNAME/ADMIN_PASSWORD(已改由数据库管理)"
+    sed -i '/^# 首个管理员/d; /^ADMIN_USERNAME=/d; /^ADMIN_PASSWORD=/d' .env
     chmod 600 .env
   fi
 fi
 
-# 校验 .env 含必需变量(含 admin 首个凭证)
-for v in ADMIN_SESSION_SECRET POSTGRES_PASSWORD ADMIN_USERNAME ADMIN_PASSWORD; do
+# 校验 .env 含必需变量(不含 admin 凭证 —— 那由数据库管理,手动 create-admin 创建)
+for v in ADMIN_SESSION_SECRET POSTGRES_PASSWORD; do
   val=$(grep "^${v}=" .env | cut -d= -f2-)
   if [ -z "$val" ]; then
     echo "    ❌ .env 缺少或为空: $v"
@@ -259,3 +240,30 @@ echo "   中间层:  http://${SSH_HOST}/"
 echo "   jwks:    http://${SSH_HOST}/.well-known/jwks.json"
 echo "   admin:   http://${SSH_HOST}/admin/login"
 echo "   CLI prod baseUrl = http://${SSH_HOST}"
+
+# ----------------------------------------------------------------------------
+# 检查是否已有 admin 账号;没有则提示手动创建(seed 不再创建任何 admin)。
+# ----------------------------------------------------------------------------
+ADMIN_COUNT=$(ssh ${SSH_OPTS} "${SSH_ADDR}" 'bash -s' <<'REMOTE_SCRIPT' 2>/dev/null || echo "0"
+set -euo pipefail
+cd /opt/auth-proxy
+# 从 .env 读 DB 凭据连库查 admins 行数;.env 里 PG_USER/PG_DB 可能叫别的名,统一用 compose 的
+DB_USER=$(grep '^POSTGRES_USER=' .env | cut -d= -f2-)
+DB_NAME=$(grep '^POSTGRES_DB=' .env | cut -d= -f2-)
+docker compose exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT COUNT(*) FROM admins;" 2>/dev/null | tr -d '[:space:]' || echo "0"
+REMOTE_SCRIPT
+)
+
+if [ -z "${ADMIN_COUNT:-0}" ] || [ "${ADMIN_COUNT:-0}" = "0" ]; then
+  echo ""
+  echo "⚠️  数据库无 admin 账号(seed 不再自动创建)。请手动创建第一个管理员:"
+  echo "    ssh root@${SSH_HOST}"
+  echo "    cd /opt/auth-proxy"
+  echo "    docker compose exec -T \\"
+  echo "      -e ADMIN_USERNAME=root -e ADMIN_PASSWORD='<你的强密码>' \\"
+  echo "      server node packages/db/dist/scripts/create-admin.js"
+  echo "    (或交互式:去掉 -e 参数,TTY 下输入用户名+密码,密码不回显)"
+  echo "    创建后即可在 http://${SSH_HOST}/admin/login 登录"
+else
+  echo "   ℹ️  数据库已有 ${ADMIN_COUNT} 个 admin 账号,用现有账号登录后台"
+fi

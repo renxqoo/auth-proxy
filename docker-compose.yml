@@ -55,9 +55,9 @@ services:
       TOKEN_TTL: "3600"
     # 不映射端口:仅内部网络可见(server 通过服务名访问)
 
-  # 一次性:建表 + 种子(RSA 密钥 + 首个 admin[仅首次])。幂等,重复跑无副作用。
-  # admin 密码不进 .env:首次部署时若 admins 表为空,seed 用代码内默认创建一次,
-  # 之后改密码走 admin 后台。已有 admin 时 seed 直接跳过,不依赖任何 ADMIN_* env。
+  # 一次性:建表 + 种子(仅 RSA 密钥)。幂等,重复跑无副作用。
+  # seed 不创建任何 admin 账号(代码零默认,避免公开仓库里的弱口令被利用)。
+  # 首个 admin 由部署者用 create-admin 脚本手动创建,不依赖任何 ADMIN_* env。
   migrate:
     image: ghcr.io/${GH_OWNER:-renxqoo}/auth-proxy/server:${IMAGE_TAG:-latest}
     depends_on:
@@ -65,11 +65,6 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-auth-proxy}:${POSTGRES_PASSWORD:-change-me-prod-use-strong-random}@postgres:5432/${POSTGRES_DB:-auth-proxy}
-      # 首个管理员凭证(seed 仅在 admins 表空时用)。强制显式提供,不给弱默认:
-      # 否则任何 docker compose up 都会静默创建 admin/admin123 弱口令账号。
-      # 初始密码由 deploy.sh 首次部署随机生成并打印;之后改密码走 admin 后台。
-      ADMIN_USERNAME: ${ADMIN_USERNAME:?ADMIN_USERNAME must be set in .env}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env; change after first login}
     command: >
       sh -c "
       node packages/db/dist/migrate.js &&
