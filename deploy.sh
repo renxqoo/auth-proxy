@@ -150,14 +150,24 @@ echo "    ✅ .env 校验通过"
 REMOTE_SCRIPT
 
 # ----------------------------------------------------------------------------
-# 3. 构建 + 校验 compose 配置(env 缺失会被 ${VAR:?} 拒绝)
+# 3. 从源码构建镜像 + 校验 compose 配置
+#
+#    注:docker-compose.yml 默认用 ghcr.io 预构建镜像(CI 模式)。本应急脚本
+#    在服务器上从源码构建,标记成 compose 期望的镜像名,使 GH_OWNER/IMAGE_TAG
+#    解析后等于本地 tag → docker compose up 直接用本地镜像,不拉 ghcr。
 # ----------------------------------------------------------------------------
-echo "==> [3/6] 构建镜像..."
+echo "==> [3/6] 构建镜像(从源码)..."
 ssh ${SSH_OPTS} "${SSH_ADDR}" 'bash -s' <<'REMOTE_SCRIPT'
 set -euo pipefail
 cd /opt/auth-proxy
-docker compose config >/dev/null
-docker compose build
+GH_OWNER="renxqoo"
+TAG="latest"
+# 构建三个应用镜像,tag 与 compose 的 image: 字段一致
+docker build -f Dockerfile.server -t ghcr.io/${GH_OWNER}/auth-proxy/server:${TAG} .
+docker build -f Dockerfile.company-mock -t ghcr.io/${GH_OWNER}/auth-proxy/company-mock:${TAG} .
+docker build -f Dockerfile.admin-web -t ghcr.io/${GH_OWNER}/auth-proxy/admin-web:${TAG} .
+# 校验 compose 配置(env 缺失会被 ${VAR:?} 拒绝)
+GH_OWNER=${GH_OWNER} IMAGE_TAG=${TAG} docker compose config >/dev/null
 REMOTE_SCRIPT
 
 # ----------------------------------------------------------------------------
@@ -167,8 +177,9 @@ echo "==> [4/6] 启动服务..."
 ssh ${SSH_OPTS} "${SSH_ADDR}" 'bash -s' <<'REMOTE_SCRIPT'
 set -euo pipefail
 cd /opt/auth-proxy
-docker compose down
-docker compose up -d
+GH_OWNER=renxqoo IMAGE_TAG=latest docker compose down
+# --pull never:用 step3 本地构建的镜像,不从 ghcr 拉
+GH_OWNER=renxqoo IMAGE_TAG=latest docker compose up -d --pull never
 REMOTE_SCRIPT
 
 # ----------------------------------------------------------------------------
