@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — OAuth 2.1 compliance fixes
+- **Access tokens now carry an `aud` (audience) claim** (RFC 9068 §3). Verification rejects tokens whose `aud` doesn't match `JWT_AUDIENCE`, preventing token confusion. New env: `JWT_AUDIENCE`.
+- **Refresh-token rotation now returns a new `refresh_token`** in the response body (OAuth 2.1 mandates rotation). Previously the response omitted the rotated token.
+- **Refresh scope is inherited from the session** instead of the hardcoded `"company.api offline_access"`, so granted scopes no longer drift after refresh.
+
+### Added — OAuth 2.1 compliance
+- **Scope validation at `/device_authorization`**: requested scopes are checked against an `ALLOWED_SCOPES` allowlist; out-of-set requests now return `invalid_scope` (previously dead code). New env: `ALLOWED_SCOPES`.
+- **Scope narrowing at token issuance**: requested scopes are intersected with the user's actual permissions (`user.scopes`); requesting a scope the user doesn't hold returns `invalid_scope`.
+- Tests: `jwt.aud.test.ts`, `token.refresh-rotation.test.ts`, `device-auth.scope.test.ts`.
+
 ### Added
 - Bilingual documentation (English default + Chinese): `README.zh-CN.md`, `SECURITY.zh-CN.md`, `CONTRIBUTING.zh-CN.md`.
 - Open-source governance files: `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, this `CHANGELOG.md`.

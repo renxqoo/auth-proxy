@@ -39,6 +39,18 @@ deviceAuthorization.post("/", async (c) => {
   // scope 处理:接受 CLI 传的 scope;offline_access 一定带上(中间层必发 refresh_token)
   const requestedScope = typeof form.scope === "string" ? form.scope : "";
   const scopes = requestedScope.split(/\s+/).filter((s) => s.length > 0);
+  // 入口白名单校验(RFC 6749 §3.3):请求的 scope 超出允许集合 → invalid_scope。
+  // offline_access 由入口自动补上,无需客户端显式请求,故不在此校验它。
+  const allowed = new Set(config.allowedScopes.split(/\s+/).filter(Boolean));
+  for (const s of scopes) {
+    if (!allowed.has(s)) {
+      return oauthError(
+        c,
+        "invalid_scope",
+        `unknown or disallowed scope: ${s}`,
+      );
+    }
+  }
   if (!scopes.includes("offline_access")) scopes.push("offline_access");
   const scope = scopes.join(" ");
 

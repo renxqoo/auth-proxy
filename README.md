@@ -293,9 +293,11 @@ Full ops guide (backup/restore, alerting, logs, migrations, troubleshooting): [d
 
 - **Company token (`ct_*`) never leaves the middle layer** — clients only hold the proxy-minted JWT.
 - **JWT RS256** — signing keys live in the `signing_keys` table and are rotatable; public key exposed at `/.well-known/jwks.json`.
+- **Access token carries `aud`** (RFC 9068 §3) — the audience is validated on verification, preventing token confusion across resource servers.
 - **`client_secret` stored scrypt-hashed**, never in plaintext.
 - **CSRF protection** — double-submit cookie on `/verify/login`.
-- **Refresh-token reuse detection** — reusing an old refresh token past `REFRESH_REUSE_GRACE_SEC` (30s) auto-revokes the session.
+- **Refresh-token rotation + reuse detection** — each refresh issues a new refresh token; reusing an old one past `REFRESH_REUSE_GRACE_SEC` (30s) auto-revokes the session.
+- **Scope enforcement** — requested scopes are validated against an allowlist (`ALLOWED_SCOPES`) at `/device_authorization` (`invalid_scope` on violation), then narrowed to what the user actually holds at token issuance.
 - **Rate limiting** — login/verify by IP, `/token` by client, `/proxy` by session.
 - **Production config validation** — `assertProductionConfig()` rejects a weak `ADMIN_SESSION_SECRET` at startup.
 - **First admin uses a strong random password** — seed never falls back to a weak default; `deploy.sh` generates a strong random value.

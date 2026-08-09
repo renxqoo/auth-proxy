@@ -100,9 +100,25 @@ export const config = {
   redisUrl: required("REDIS_URL", "redis://localhost:6379/2"),
   // JWT 签发者(RS256;密钥从 signing_keys 表取,见 Phase C)
   jwtIssuer: required("JWT_ISSUER", "auth-proxy"),
+  /**
+   * access token 的 audience(RFC 9068 §3 要求 JWT access token 必须有 aud)。
+   * 标识资源服务器(gateway /proxy 本身或下游公司应用)。校验时必须匹配,
+   * 防止为 A 签发的 token 被拿到 B 使用(token confusion)。
+   * 单一固定值适配当前单公司应用架构。
+   */
+  jwtAudience: required("JWT_AUDIENCE", "auth-proxy"),
   // token 生命周期(秒)
   jwtAccessTtlSec: num("JWT_ACCESS_TTL", 3600), // 1h
   jwtRefreshTtlSec: num("JWT_REFRESH_TTL", 86400 * 7), // 7d
+  /**
+   * 允许的 scope 白名单(空格分隔)。device_authorization 入口校验:
+   * 请求的 scope 超出此集合 → invalid_scope(RFC 6749 §3.3)。
+   * 注:offline_access 由入口自动补上,无需在此显式列出(但列了也不冲突)。
+   */
+  allowedScopes: required(
+    "ALLOWED_SCOPES",
+    "orders:read orders:write products:read invoices:read admin offline_access",
+  ),
   // device flow
   deviceCodeTtlSec: num("DEVICE_CODE_TTL", 600), // 10min
   devicePollIntervalSec: num("DEVICE_POLL_INTERVAL", 5),

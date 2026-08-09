@@ -74,6 +74,36 @@ token.post("/", async (c) => {
   );
 });
 
+/**
+ * scope 收窄:把请求的 scope 限制在用户实际拥有的权限内。
+ *
+ * - offline_access 是中间层续期所需的 scope,不计入用户权限比对(自动放行)。
+ * - 请求的其它 scope 必须全部 ∈ userScopes;否则返回 null(调用方返 invalid_scope)。
+ * - 返回值:收窄后的 scope 字符串(保留请求顺序,含 offline_access)。
+ *
+ * 设计:授权边界在签发时生效 —— 即便请求了超出权限的 scope,token 里也
+ * 只会包含用户实际拥有的。但为了符合 OAuth 的"最小惊讶"并避免静默降级,
+ * 对越权请求直接拒绝(invalid_scope),而非悄悄裁剪。
+ */
+function narrowScope(requested: string, userScopes: string[]): string | null {
+  const requestedScopes = requested.split(/\s+/).filter((s) => s.length > 0);
+  const userScopeSet = new Set(userScopes);
+  for (const s of requestedScopes) {
+    if (s === "offline_access") continue; // 中间层自身 scope,放行
+    if (!userScopeSet.has(s)) return null; // 越权 → 拒绝
+  }
+  // 保留请求顺序(去重)
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const s of requestedScopes) {
+    if (!seen.has(s)) {
+      seen.add(s);
+      out.push(s);
+    }
+  }
+  return out.join(" ");
+}
+
 // ---------- A. device_code grant ----------
 async function handleDeviceCodeGrant(
   c: Context,
@@ -115,9 +145,21 @@ async function handleDeviceCodeGrant(
       if (!rec.companyToken) {
         return oauthError(c, "expired_token", "device_code missing token");
       }
+      // scope 收窄:请求的 scope 必须是用户实际拥有的(user.scopes,
+      // 登录时公司应用返回并快照进 companyToken.user)。请求了用户没有的
+      // scope → invalid_scope(防止用户拿到超出自身权限的 token)。
+      // offline_access 是中间层自身所需的续期 scope,不计入用户权限比对。
+      const grantedScope = narrowScope(rec.scope, rec.companyToken.user.scopes);
+      if (grantedScope === null) {
+        return oauthError(
+          c,
+          "invalid_scope",
+          "requested scope exceeds user's granted permissions",
+        );
+      }
       const session = await createSession(
         rec.companyToken,
-        rec.scope,
+        grantedScope,
         rec.clientId,
       );
       await consumeDeviceCode(deviceCode);
@@ -125,7 +167,7 @@ async function handleDeviceCodeGrant(
         await issueTokenResponse(
           session.sessionId,
           session.refreshId,
-          rec.scope,
+          grantedScope,
         ),
       );
     }
@@ -173,7 +215,7 @@ async function handleRefreshGrant(
       await issueTokenResponse(
         updated.sessionId,
         updated.refreshId,
-        `company.api offline_access`,
+        updated.scope,
       ),
     );
   }
@@ -212,7 +254,7 @@ async function handleGraceOrReuse(
       await issueTokenResponse(
         session.sessionId,
         session.refreshId,
-        `company.api offline_access`,
+        session.scope,
       ),
     );
   }

@@ -22,6 +22,7 @@ import { getSigningKeyRepo } from "./repos/index.js";
 export interface AccessClaims {
   sub: string; // sessionId
   scope: string;
+  aud: string; // 资源服务器标识(RFC 9068 §3)
   typ: "access";
 }
 
@@ -66,6 +67,7 @@ export async function signAccessToken(
   return new SignJWT({ scope, typ: "access" })
     .setProtectedHeader({ alg: "RS256", kid: key.kid })
     .setIssuer(config.jwtIssuer)
+    .setAudience(config.jwtAudience)
     .setSubject(sessionId)
     .setIssuedAt()
     .setExpirationTime(`${config.jwtAccessTtlSec}s`)
@@ -96,11 +98,13 @@ export async function verifyAccessToken(
     const verifier = await getVerifier();
     const { payload } = await jwtVerify(token, verifier, {
       issuer: config.jwtIssuer,
+      audience: config.jwtAudience,
     });
     if (payload.typ !== "access") return null;
     return {
       sub: payload.sub ?? "",
       scope: (payload.scope as string | undefined) ?? "",
+      aud: (payload.aud as string | undefined) ?? "",
       typ: "access",
     };
   } catch {

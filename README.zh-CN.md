@@ -293,9 +293,11 @@ ALERT_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxx
 
 - **公司 token(`ct_*`)永不离开中间层** — 客户端只持有中间层签发的 JWT。
 - **JWT RS256** — 签名密钥存 `signing_keys` 表,可轮转;公钥经 `/.well-known/jwks.json` 暴露。
+- **access token 含 `aud`**(RFC 9068 §3)— 校验时必须匹配 audience,防 token confusion(跨资源服务器误用)。
 - **`client_secret` scrypt 哈希存储**,非明文。
 - **CSRF 防护** — `/verify/login` 双重提交 cookie。
-- **Refresh 重用检测** — 旧 refresh 超 `REFRESH_REUSE_GRACE_SEC`(30s)再用 → 自动吊销 session。
+- **Refresh token 轮换 + 重用检测** — 每次刷新签发新的 refresh token;旧 refresh 超 `REFRESH_REUSE_GRACE_SEC`(30s)再用 → 自动吊销 session。
+- **Scope 授权边界生效** — `/device_authorization` 入口用白名单(`ALLOWED_SCOPES`)校验(违规返 `invalid_scope`),签发时再收窄到用户实际拥有的权限。
 - **限流** — login/verify 按 IP,`/token` 按 client,`/proxy` 按 session。
 - **生产配置校验** — `assertProductionConfig()` 启动时拒绝弱 `ADMIN_SESSION_SECRET`。
 - **首个管理员强制随机密码** — seed 不回退弱默认,由 `deploy.sh` 生成强随机值。
