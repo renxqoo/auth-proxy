@@ -180,6 +180,58 @@ describe("gateway 通配符 + method 匹配", () => {
   });
 });
 
+describe("gateway sessionType:agent(admin issue-token,带 company token)放行", () => {
+  it("sessionType=agent + 有 company token + 路径策略放行 → 200(不应 403)", async () => {
+    // 重新 mock findSessionBySessionId 返回 agent session + company token
+    const { findSessionBySessionId } = await import("../src/sessionStore.js");
+    vi.mocked(findSessionBySessionId).mockResolvedValueOnce({
+      sessionId: "sid_agent",
+      userId: 1,
+      clientId: "admin-issued",
+      refreshId: "idrt_agent",
+      user: { id: "u_alice", name: "alice", scopes: ["orders:read"] },
+      companyAccessToken: "ct_alice",
+      companyRefreshToken: "cr_alice",
+      companyTokenExpiresAt: Date.now() + 3600_000,
+      scope: "orders:read offline_access",
+      sessionType: "agent",
+      revoked: false,
+    } as never);
+    policiesRef.policies = [
+      { id: 1, pattern: "/api/orders*", scope: "orders:read", method: "GET", description: null, createdAt: new Date() },
+    ];
+    jwtRef.scope = "orders:read offline_access";
+    const res = await proxyGet("/api/orders");
+    expect(res.status).toBe(200);
+  });
+
+  it("sessionType=machine(client_credentials,占位 company token)→ 403", async () => {
+    const { findSessionBySessionId } = await import("../src/sessionStore.js");
+    vi.mocked(findSessionBySessionId).mockResolvedValueOnce({
+      sessionId: "sid_machine",
+      userId: 1,
+      clientId: "cli_machine",
+      refreshId: "idrt_machine",
+      user: { id: "u_machine", name: "machine", scopes: [] },
+      // 真实 createMachine 写入的占位值
+      companyAccessToken: "__none__",
+      companyRefreshToken: "__none__",
+      companyTokenExpiresAt: Date.now() + 365 * 24 * 3600 * 1000,
+      scope: "offline_access",
+      sessionType: "machine",
+      revoked: false,
+    } as never);
+    policiesRef.policies = [
+      { id: 1, pattern: "/api/orders*", scope: "orders:read", method: "GET", description: null, createdAt: new Date() },
+    ];
+    jwtRef.scope = "orders:read offline_access";
+    const res = await proxyGet("/api/orders");
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error_description: string };
+    expect(body.error_description).toContain("company token");
+  });
+});
+
 describe("RFC 6750 §3: WWW-Authenticate 响应头", () => {
   it("缺 token → 401 + WWW-Authenticate: Bearer realm=...", async () => {
     policiesRef.policies = [

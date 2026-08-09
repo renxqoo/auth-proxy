@@ -7,6 +7,7 @@ import { oauthError } from "../oauthHelpers.js";
 import { enforceRateLimit } from "../middleware/rateLimit.js";
 import { getAuditRepo, getRoutePolicyRepo } from "../repos/index.js";
 import { findMatchingPolicy } from "../repos/routePolicyRepo.js";
+import { hasCompanyToken } from "../repos/sessionRepo.js";
 
 /**
  * /proxy/* —— API Gateway。CLI 拿业务数据走这里。
@@ -60,15 +61,15 @@ gateway.all("/*", async (c) => {
   }
 
   // 2. 取(必要时刷新)company access token
-  // 机器/agent session(client_credentials / admin 签发)无真实 company token → 跳过刷新
+  // 按真实状态判定:无可用 company token 的 session(machine/client_credentials)不能转发。
+  // agent session(admin issue-token,经 createSession 创建)携带真实 company token,可正常代理。
+  // 不依赖 sessionType 字符串 —— 避免"新增类型漏改 guard"的脆弱性。
   let companyAccessToken: string;
-  if (session.sessionType === "machine" || session.sessionType === "agent") {
-    // 机器 session 不转发到公司应用(它没有 company token)
-    // 这种 session 的 gateway 访问应该走不需要 company token 的路径(或在此拒绝)
+  if (!hasCompanyToken(session)) {
     return c.json(
       {
         error: "invalid_request",
-        error_description: "machine/agent sessions cannot proxy to company app",
+        error_description: "session without a company token cannot proxy to company app",
       },
       403,
     );

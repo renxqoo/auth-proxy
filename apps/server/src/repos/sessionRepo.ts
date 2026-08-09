@@ -25,6 +25,23 @@ export interface SessionData {
   sessionType: string; // "user" | "machine" | "agent"
 }
 
+/**
+ * machine session(client_credentials)无真实公司账号,company token 字段用此占位。
+ * 集中定义:判定"是否有可用 company token"只看这个常量,不散落字符串字面量。
+ */
+export const NO_COMPANY_TOKEN = "__none__";
+
+/**
+ * 判定 session 是否携带可用的 company token(能转发到公司应用)。
+ * 判定依据是真实状态(占位值/空),而非 sessionType 字符串标签 ——
+ * 任何带真实 company token 的 session(user / agent)都应能代理,
+ * 只有占位的 machine session 不能。
+ */
+export function hasCompanyToken(s: Pick<SessionData, "companyAccessToken">): boolean {
+  const t = s.companyAccessToken;
+  return typeof t === "string" && t.length > 0 && t !== NO_COMPANY_TOKEN;
+}
+
 /** company token 的最小契约(repo 不依赖 shared 的完整类型)。 */
 export interface CompanyTokenFields {
   access_token: string;
@@ -118,8 +135,8 @@ export class SessionRepo {
         userId: params.userId,
         clientId: params.clientId,
         refreshId: params.refreshId,
-        companyAccessToken: "__none__",
-        companyRefreshToken: "__none__",
+        companyAccessToken: NO_COMPANY_TOKEN,
+        companyRefreshToken: NO_COMPANY_TOKEN,
         companyTokenExpiresAt: new Date(Date.now() + 365 * 24 * 3600 * 1000),
         scope: params.scope,
         sessionType: params.sessionType,
