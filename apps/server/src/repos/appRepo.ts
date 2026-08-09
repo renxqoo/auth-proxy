@@ -46,7 +46,20 @@ export interface AppRecord {
   revoked: boolean;
   createdFromTokenId: number | null;
   lastUsedAt: Date | null;
+  allowedScopes: string[]; // 该 client 允许请求的 scope;空 = 允许全部已定义
 }
+
+/** client 查询的公共列(不含 secret)。list/findById/findByClientId 共用。 */
+const APP_COLUMNS = {
+  id: apps.id,
+  clientId: apps.clientId,
+  name: apps.name,
+  createdAt: apps.createdAt,
+  revoked: apps.revoked,
+  createdFromTokenId: apps.createdFromTokenId,
+  lastUsedAt: apps.lastUsedAt,
+  allowedScopes: apps.allowedScopes,
+} as const;
 
 export class AppRepo {
   /**
@@ -87,36 +100,24 @@ export class AppRepo {
   /** 列出所有 client(不含 secret)。 */
   async list(): Promise<AppRecord[]> {
     const db = getDb();
-    const rows = await db
-      .select({
-        id: apps.id,
-        clientId: apps.clientId,
-        name: apps.name,
-        createdAt: apps.createdAt,
-        revoked: apps.revoked,
-        createdFromTokenId: apps.createdFromTokenId,
-        lastUsedAt: apps.lastUsedAt,
-      })
-      .from(apps)
-      .orderBy(apps.createdAt);
+    const rows = await db.select(APP_COLUMNS).from(apps).orderBy(apps.createdAt);
     return rows;
   }
 
   /** 按 id 查(取 createdFromTokenId 用)。 */
   async findById(id: number): Promise<AppRecord | null> {
     const db = getDb();
+    const rows = await db.select(APP_COLUMNS).from(apps).where(eq(apps.id, id));
+    return rows[0] ?? null;
+  }
+
+  /** 按 clientId 查(device_authorization 校验 client 级 scope 用)。 */
+  async findByClientId(clientId: string): Promise<AppRecord | null> {
+    const db = getDb();
     const rows = await db
-      .select({
-        id: apps.id,
-        clientId: apps.clientId,
-        name: apps.name,
-        createdAt: apps.createdAt,
-        revoked: apps.revoked,
-        createdFromTokenId: apps.createdFromTokenId,
-        lastUsedAt: apps.lastUsedAt,
-      })
+      .select(APP_COLUMNS)
       .from(apps)
-      .where(eq(apps.id, id));
+      .where(eq(apps.clientId, clientId));
     return rows[0] ?? null;
   }
 
@@ -126,6 +127,17 @@ export class AppRepo {
     const rows = await db
       .update(apps)
       .set({ revoked })
+      .where(eq(apps.id, id))
+      .returning({ id: apps.id });
+    return rows.length > 0;
+  }
+
+  /** 设置 client 允许的 scope 子集(空数组 = 允许全部)。 */
+  async setAllowedScopes(id: number, allowedScopes: string[]): Promise<boolean> {
+    const db = getDb();
+    const rows = await db
+      .update(apps)
+      .set({ allowedScopes })
       .where(eq(apps.id, id))
       .returning({ id: apps.id });
     return rows.length > 0;

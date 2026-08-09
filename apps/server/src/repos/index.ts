@@ -10,6 +10,8 @@ import { TokenRepo } from "./tokenRepo.js";
 import type { TokenRecord } from "./tokenRepo.js";
 import { AdminRepo } from "./adminRepo.js";
 import type { AdminRecord } from "./adminRepo.js";
+import { ScopeRepo } from "./scopeRepo.js";
+import type { ScopeRecord } from "./scopeRepo.js";
 
 export type {
   SessionData,
@@ -17,6 +19,7 @@ export type {
   TokenRecord,
   AppRecord,
   AdminRecord,
+  ScopeRecord,
 };
 
 let sessionRepo: SessionRepo | null = null;
@@ -26,6 +29,7 @@ let signingKeyRepo: SigningKeyRepo | null = null;
 let auditRepo: AuditRepo | null = null;
 let tokenRepo: TokenRepo | null = null;
 let adminRepo: AdminRepo | null = null;
+let scopeRepo: ScopeRepo | null = null;
 
 export function getSessionRepo(): SessionRepo {
   if (!sessionRepo) sessionRepo = new SessionRepo();
@@ -54,4 +58,8 @@ export function getTokenRepo(): TokenRepo {
 export function getAdminRepo(): AdminRepo {
   if (!adminRepo) adminRepo = new AdminRepo();
   return adminRepo;
+}
+export function getScopeRepo(): ScopeRepo {
+  if (!scopeRepo) scopeRepo = new ScopeRepo();
+  return scopeRepo;
 }

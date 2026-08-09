@@ -297,7 +297,11 @@ ALERT_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxx
 - **`client_secret` scrypt 哈希存储**,非明文。
 - **CSRF 防护** — `/verify/login` 双重提交 cookie。
 - **Refresh token 轮换 + 重用检测** — 每次刷新签发新的 refresh token;旧 refresh 超 `REFRESH_REUSE_GRACE_SEC`(30s)再用 → 自动吊销 session。
-- **Scope 授权边界生效** — `/device_authorization` 入口用白名单(`ALLOWED_SCOPES`)校验(违规返 `invalid_scope`),签发时再收窄到用户实际拥有的权限。
+- **Scope 授权边界(三层,OAuth 2.1)** — scope 授权动态存库,可经 admin 后台管理:
+  - **层 1(全局定义):** scope 在 `scopes` 表定义(seed 默认:`orders:read`、`admin` 等);请求的 scope 必须存在 → 否则 `invalid_scope`。
+  - **层 3(client 绑定):** 每个 client(`apps.allowed_scopes`)可限制为 scope 子集;空 = 允许全部(默认)。在 `/device_authorization` 强制。
+  - **层 2(用户收窄):** 签发时请求的 scope 与用户实际权限(`user.scopes`)取交集;越权 → `invalid_scope`。
+  - 系统 scope(`offline_access`、`company.api`)自动授予,豁免层 2、3。
 - **限流** — login/verify 按 IP,`/token` 按 client,`/proxy` 按 session。
 - **生产配置校验** — `assertProductionConfig()` 启动时拒绝弱 `ADMIN_SESSION_SECRET`。
 - **首个管理员强制随机密码** — seed 不回退弱默认,由 `deploy.sh` 生成强随机值。

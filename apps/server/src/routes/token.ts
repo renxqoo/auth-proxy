@@ -18,7 +18,7 @@ import {
 } from "../sessionStore.js";
 import { oauthError, verifyClient } from "../oauthHelpers.js";
 import { enforceRateLimit } from "../middleware/rateLimit.js";
-import { getAuditRepo } from "../repos/index.js";
+import { getAuditRepo, getScopeRepo } from "../repos/index.js";
 import {
   signAccessToken,
   signRefreshToken,
@@ -75,10 +75,11 @@ token.post("/", async (c) => {
 });
 
 /**
- * scope 收窄:把请求的 scope 限制在用户实际拥有的权限内。
+ * scope 收窄(层 2:用户权限):把请求的 scope 限制在用户实际拥有的权限内。
  *
- * - 系统 scope(config.systemScopes,如 offline_access / company.api)是中间层
+ * - 系统 scope(scopes 表 isSystem=true,如 offline_access / company.api)是中间层
  *   自身管理的,不属于公司应用返回的用户权限(user.scopes),不参与权限比对(自动放行)。
+ *   系统 scope 从 DB 读(带缓存);表为空时回退 config.systemScopes(向后兼容)。
  * - 请求的其它 scope 必须全部 ∈ userScopes;否则返回 null(调用方返 invalid_scope)。
  * - 返回值:收窄后的 scope 字符串(保留请求顺序,含系统 scope)。
  *
@@ -86,12 +87,18 @@ token.post("/", async (c) => {
  * 只会包含用户实际拥有的。但为了符合 OAuth 的"最小惊讶"并避免静默降级,
  * 对越权请求直接拒绝(invalid_scope),而非悄悄裁剪。
  */
-function narrowScope(requested: string, userScopes: string[]): string | null {
+async function narrowScope(
+  requested: string,
+  userScopes: string[],
+): Promise<string | null> {
   const requestedScopes = requested.split(/\s+/).filter((s) => s.length > 0);
   const userScopeSet = new Set(userScopes);
-  const systemScopeSet = new Set(
-    config.systemScopes.split(/\s+/).filter(Boolean),
-  );
+  // 系统 scope 从 DB 读(isSystem=true);表为空时回退环境变量
+  const { systemNames } = await getScopeRepo().getSets();
+  const systemScopeSet =
+    systemNames.size > 0
+      ? systemNames
+      : new Set(config.systemScopes.split(/\s+/).filter(Boolean));
   for (const s of requestedScopes) {
     if (systemScopeSet.has(s)) continue; // 系统 scope,放行
     if (!userScopeSet.has(s)) return null; // 越权 → 拒绝
@@ -153,7 +160,7 @@ async function handleDeviceCodeGrant(
       // 登录时公司应用返回并快照进 companyToken.user)。请求了用户没有的
       // scope → invalid_scope(防止用户拿到超出自身权限的 token)。
       // offline_access 是中间层自身所需的续期 scope,不计入用户权限比对。
-      const grantedScope = narrowScope(rec.scope, rec.companyToken.user.scopes);
+      const grantedScope = await narrowScope(rec.scope, rec.companyToken.user.scopes);
       if (grantedScope === null) {
         return oauthError(
           c,

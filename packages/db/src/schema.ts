@@ -57,6 +57,23 @@ export const apps = pgTable("apps", {
   revoked: boolean("revoked").notNull().default(false),
   createdFromTokenId: integer("created_from_token_id"), // 注册自哪个令牌
   lastUsedAt: timestamp("last_used_at", { withTimezone: true }), // 最后使用(登录时更新)
+  // 该 client 允许请求的 scope 子集。空 [] = 允许全部已定义 scope(默认,向后兼容);
+  // admin 裁剪后只允许列出的。运行时 device_authorization 校验:请求的 scope 必须 ∈ 此集合。
+  allowedScopes: text("allowed_scopes").array().notNull().default([]),
+});
+
+// ---------- scopes(全局 scope 定义) ----------
+// OAuth 标准三层 scope 管理之层 1:全局定义。取代环境变量白名单,可经 admin 后台增删。
+// isSystem=true 的 scope 是中间层自身管理的(offline_access/company.api),
+// 不参与用户权限收窄(narrowScope 豁免它们)。
+export const scopes = pgTable("scopes", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull().unique(), // "orders:read"
+  description: text("description"), // "读订单列表/详情"
+  isSystem: boolean("is_system").notNull().default(false), // 系统 scope,豁免用户收窄
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
 });
 
 // ---------- users ----------
@@ -174,6 +191,8 @@ export type SigningKey = typeof signingKeys.$inferSelect;
 export type NewSigningKey = typeof signingKeys.$inferInsert;
 export type App = typeof apps.$inferSelect;
 export type NewApp = typeof apps.$inferInsert;
+export type Scope = typeof scopes.$inferSelect;
+export type NewScope = typeof scopes.$inferInsert;
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type Session = typeof sessions.$inferSelect;

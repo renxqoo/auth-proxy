@@ -297,7 +297,11 @@ Full ops guide (backup/restore, alerting, logs, migrations, troubleshooting): [d
 - **`client_secret` stored scrypt-hashed**, never in plaintext.
 - **CSRF protection** — double-submit cookie on `/verify/login`.
 - **Refresh-token rotation + reuse detection** — each refresh issues a new refresh token; reusing an old one past `REFRESH_REUSE_GRACE_SEC` (30s) auto-revokes the session.
-- **Scope enforcement** — requested scopes are validated against an allowlist (`ALLOWED_SCOPES`) at `/device_authorization` (`invalid_scope` on violation), then narrowed to what the user actually holds at token issuance.
+- **Scope enforcement (three-tier, OAuth 2.1)** — scope authorization is dynamic and stored in the DB, manageable via the admin console:
+  - **Tier 1 (global definition):** scopes are defined in the `scopes` table (seed defaults: `orders:read`, `admin`, etc.); requested scopes must exist here → else `invalid_scope`.
+  - **Tier 3 (client binding):** each client (`apps.allowed_scopes`) can be restricted to a scope subset; empty = all defined scopes (default). Enforced at `/device_authorization`.
+  - **Tier 2 (user narrowing):** at token issuance, requested scopes are intersected with the user's actual permissions (`user.scopes`); over-scoped requests → `invalid_scope`.
+  - System scopes (`offline_access`, `company.api`) are auto-granted and exempt from tiers 2 & 3.
 - **Rate limiting** — login/verify by IP, `/token` by client, `/proxy` by session.
 - **Production config validation** — `assertProductionConfig()` rejects a weak `ADMIN_SESSION_SECRET` at startup.
 - **First admin uses a strong random password** — seed never falls back to a weak default; `deploy.sh` generates a strong random value.

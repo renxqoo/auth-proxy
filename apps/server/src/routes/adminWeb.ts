@@ -5,6 +5,7 @@ import {
   getTokenRepo,
   getAppRepo,
   getAuditRepo,
+  getScopeRepo,
 } from "../repos/index.js";
 import { revokeSessionsByClient } from "../sessionStore.js";
 import { safeError } from "../config.js";
@@ -203,6 +204,90 @@ adminWeb.delete("/apps/:id", async (c) => {
   await revokeSessionsByClient(app.clientId);
   await getAppRepo().delete(id);
   return c.json({ ok: true });
+});
+
+// 设置 client 允许的 scope 子集(层 3:client 绑定)。
+// body: { scopes: string[] } — 每个 scope 必须在全局 scopes 表里定义过。
+// 空数组 = 允许全部已定义 scope(向后兼容默认)。
+adminWeb.post("/apps/:id/scopes", async (c) => {
+  const id = Number(c.req.param("id"));
+  const app = await getAppRepo().findById(id);
+  if (!app) return c.json({ error: "not_found" }, 404);
+  const body = await c.req.json().catch(() => null);
+  const scopes = Array.isArray(body?.scopes)
+    ? body.scopes.filter((s: unknown): s is string => typeof s === "string" && s.length > 0)
+    : null;
+  if (scopes === null) {
+    return c.json(
+      { error: "invalid_request", error_description: "scopes[] required" },
+      400,
+    );
+  }
+  // 校验:每个 scope 必须在全局定义内(防注入未定义 scope)
+  const { names: globalNames } = await getScopeRepo().getSets();
+  if (globalNames.size > 0) {
+    for (const s of scopes) {
+      if (!globalNames.has(s)) {
+        return c.json(
+          {
+            error: "invalid_request",
+            error_description: `scope ${s} is not defined in global scopes`,
+          },
+          400,
+        );
+      }
+    }
+  }
+  const ok = await getAppRepo().setAllowedScopes(id, scopes);
+  return ok ? c.json({ ok: true, allowedScopes: scopes }) : c.json({ error: "not_found" }, 404);
+});
+
+// ---------- scope 定义管理(层 1:全局定义)----------
+adminWeb.get("/scopes", async (c) => {
+  const list = await getScopeRepo().list();
+  return c.json({ scopes: list });
+});
+
+adminWeb.post("/scopes", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const name = typeof body?.name === "string" ? body.name.trim() : "";
+  const description =
+    typeof body?.description === "string" ? body.description.trim() : "";
+  const isSystem = body?.isSystem === true;
+  if (!name || name.length > MAX_NAME_LEN) {
+    return c.json(
+      {
+        error: "invalid_request",
+        error_description: "name required (<=256 chars)",
+      },
+      400,
+    );
+  }
+  const rec = await getScopeRepo().create({ name, description, isSystem });
+  if (!rec) {
+    return c.json(
+      { error: "conflict", error_description: "scope name already exists" },
+      409,
+    );
+  }
+  return c.json(rec, 201);
+});
+
+adminWeb.delete("/scopes/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  const existing = await getScopeRepo().findById(id);
+  if (!existing) return c.json({ error: "not_found" }, 404);
+  if (existing.isSystem) {
+    return c.json(
+      {
+        error: "invalid_request",
+        error_description: "system scopes cannot be deleted",
+      },
+      400,
+    );
+  }
+  const ok = await getScopeRepo().delete(id);
+  return ok ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
 });
 
 // ---------- 审计 ----------

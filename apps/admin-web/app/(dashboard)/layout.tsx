@@ -26,6 +26,7 @@ export default async function DashboardLayout({
     { href: "/", label: "概览" },
     { href: "/tokens", label: "注册令牌" },
     { href: "/apps", label: "客户端" },
+    { href: "/scopes", label: "Scope" },
     { href: "/audit", label: "审计日志" },
     { href: "/admins", label: "管理员" },
   ];

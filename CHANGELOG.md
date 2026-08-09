@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — three-tier dynamic scope management (OAuth 2.1)
+- **New `scopes` table (Tier 1):** global scope definitions stored in the DB, manageable via admin console (`GET/POST/DELETE /scopes`). Seed inserts 7 defaults (`orders:read`, `admin`, system scopes, etc.). Replaces the static env-var whitelist as the source of truth (env `ALLOWED_SCOPES` retained as fallback when table is empty).
+- **Client-level scope binding (Tier 3):** `apps.allowed_scopes` column lets admins restrict each client to a scope subset (empty = all, default). Enforced at `/device_authorization`. Closes the gap where any client could request any whitelisted scope (e.g. `admin`).
+- **System-scope flag:** `scopes.is_system` marks `offline_access` / `company.api` as middle-layer scopes, exempt from Tier 2 (user narrowing) and Tier 3 (client binding).
+- Admin console: new "Scope" management page + "edit scope" dialog on the clients page.
+- New endpoints: `GET/POST/DELETE /admin/web/scopes`, `POST /admin/web/apps/:id/scopes`.
+- Migration `0006_condemned_pyro.sql` (CREATE TABLE scopes + ALTER apps).
+- Tests: `scope.client-binding.test.ts` (Tier 3 enforcement); updated `device-auth.scope.test.ts` + `security.*` mocks.
+
 ### Changed — OAuth 2.1 compliance fixes
 - **Access tokens now carry an `aud` (audience) claim** (RFC 9068 §3). Verification rejects tokens whose `aud` doesn't match `JWT_AUDIENCE`, preventing token confusion. New env: `JWT_AUDIENCE`.
 - **Refresh-token rotation now returns a new `refresh_token`** in the response body (OAuth 2.1 mandates rotation). Previously the response omitted the rotated token.

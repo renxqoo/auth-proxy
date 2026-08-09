@@ -3,11 +3,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 /**
  * /device_authorization scope 入口校验测试 —— RFC 6749 §3.3。
  *
- * 修复前:请求任意 scope 都被原样接受(invalid_scope 是死码),授权边界名存实亡。
- * 修复后:请求的 scope 必须在 config.allowedScopes 白名单内,否则 invalid_scope。
+ * 三层模型:
+ *   层 1(全局):scope 必须在全局定义内。本测试模拟 DB scopes 表为空,
+ *               触发回退到 config.allowedScopes 环境变量白名单(向后兼容)。
+ *   层 3(client):allowedScopes 为空 = 允许全部(默认,本测试场景)。
  *
- * 用户 scope 收窄(请求的 scope 还必须是用户实际拥有的)在 token 端点测试,
- * 这里只测入口白名单。offline_access 由入口自动补上,不要求客户端显式请求。
+ * 用户 scope 收窄(层 2)在 token 端点测试,这里只测入口。
  */
 
 // 限流 mock:始终放行(scope 校验在限流之后,确保能走到校验逻辑)
@@ -35,6 +36,20 @@ const { createSpy } = vi.hoisted(() => ({
 vi.mock("../src/repos/index.js", () => ({
   getAppRepo: () => ({
     verifyClient: vi.fn(async (cid: string) => cid),
+    findByClientId: vi.fn(async () => ({
+      id: 1,
+      clientId: "cli_test",
+      name: "test",
+      createdAt: new Date(),
+      revoked: false,
+      createdFromTokenId: null,
+      lastUsedAt: null,
+      allowedScopes: [], // 空 = 允许全部(默认)
+    })),
+  }),
+  // DB scopes 表为空 → 触发回退到 config.allowedScopes 环境变量(测向后兼容)
+  getScopeRepo: () => ({
+    getSets: vi.fn(async () => ({ names: new Set<string>(), systemNames: new Set<string>() })),
   }),
 }));
 vi.mock("../src/deviceCodeStore.js", () => ({
