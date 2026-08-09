@@ -47,6 +47,9 @@ export interface AppRecord {
   createdFromTokenId: number | null;
   lastUsedAt: Date | null;
   allowedScopes: string[]; // 该 client 允许请求的 scope;空 = 允许全部已定义
+  redirectUris: string[]; // RFC 7591:允许的回调地址
+  grantTypes: string[]; // RFC 7591:该 client 允许的 grant_type
+  tokenEndpointAuthMethod: string; // RFC 7591:client 认证方式
 }
 
 /** client 查询的公共列(不含 secret)。list/findById/findByClientId 共用。 */
@@ -59,6 +62,9 @@ const APP_COLUMNS = {
   createdFromTokenId: apps.createdFromTokenId,
   lastUsedAt: apps.lastUsedAt,
   allowedScopes: apps.allowedScopes,
+  redirectUris: apps.redirectUris,
+  grantTypes: apps.grantTypes,
+  tokenEndpointAuthMethod: apps.tokenEndpointAuthMethod,
 } as const;
 
 export class AppRepo {
@@ -87,6 +93,9 @@ export class AppRepo {
     clientSecret: string;
     name: string;
     createdFromTokenId?: number;
+    redirectUris?: string[];
+    grantTypes?: string[];
+    tokenEndpointAuthMethod?: string;
   }): Promise<void> {
     const db = getDb();
     await db.insert(apps).values({
@@ -94,6 +103,9 @@ export class AppRepo {
       clientSecret: hashSecret(params.clientSecret),
       name: params.name,
       createdFromTokenId: params.createdFromTokenId ?? null,
+      redirectUris: params.redirectUris ?? [],
+      grantTypes: params.grantTypes ?? [],
+      tokenEndpointAuthMethod: params.tokenEndpointAuthMethod ?? "client_secret_basic",
     });
   }
 

@@ -140,14 +140,16 @@ ADMIN_SESSION_SECRET=dev_secret_change_me_at_least_32_bytes_long \
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `POST` | `/register` | 动态客户端注册(返回 `client_id` + `client_secret`) |
+| `POST` | `/register` | RFC 7591 动态客户端注册(`client_metadata` → `client_id` + `client_secret`) |
+| `GET` | `/authorize` | RFC 6749 §4.1.1 授权端点(authorization_code + PKCE S256) |
 | `POST` | `/device_authorization` | 申请设备码 → 返回 `device_code`、`user_code`、`verification_uri` |
-| `POST` | `/token` | 轮询换 token(`grant_type=urn:ietf:params:oauth:grant-type:device_code`)或刷新(`grant_type=refresh_token`) |
+| `POST` | `/token` | 签发 token:`authorization_code`(PKCE)、`device_code` 或 `refresh_token` grant |
 | `GET` | `/verify` | 用户在浏览器打开的登录页(接受 `?user_code=`) |
 | `POST` | `/verify/login` | 提交公司账号密码,授权该设备 |
 | `GET` | `/user_info` | 查询当前 session 信息(Bearer access token) |
 | `POST` | `/revoke` | 吊销 session/token |
 | `GET` | `/.well-known/jwks.json` | JWT 公钥(RS256) |
+| `GET` | `/.well-known/oauth-authorization-server` | RFC 8414 metadata(issuer、端点、grant、PKCE method、scope) |
 
 ### 代理网关
 

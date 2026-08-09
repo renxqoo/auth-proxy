@@ -140,14 +140,16 @@ All endpoints are served by the middle layer (`apps/server`), rooted at the serv
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/register` | Dynamic client registration (returns `client_id` + `client_secret`) |
+| `POST` | `/register` | RFC 7591 dynamic client registration (`client_metadata` → `client_id` + `client_secret`) |
+| `GET` | `/authorize` | RFC 6749 §4.1.1 authorization endpoint (authorization_code + PKCE S256) |
 | `POST` | `/device_authorization` | Request a device code → returns `device_code`, `user_code`, `verification_uri` |
-| `POST` | `/token` | Poll for token (`grant_type=urn:ietf:params:oauth:grant-type:device_code`) or refresh (`grant_type=refresh_token`) |
+| `POST` | `/token` | Token issuance: `authorization_code` (PKCE), `device_code`, or `refresh_token` grant |
 | `GET` | `/verify` | Login page the user opens in a browser (accepts `?user_code=`) |
 | `POST` | `/verify/login` | Submit company username/password to authorize the device |
 | `GET` | `/user_info` | Get current session info (bearer access token) |
 | `POST` | `/revoke` | Revoke a session/token |
 | `GET` | `/.well-known/jwks.json` | Public JWT signing keys (RS256) |
+| `GET` | `/.well-known/oauth-authorization-server` | RFC 8414 metadata (issuer, endpoints, grants, PKCE methods, scopes) |
 
 ### Proxy gateway
 

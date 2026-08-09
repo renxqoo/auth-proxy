@@ -60,6 +60,10 @@ export const apps = pgTable("apps", {
   // 该 client 允许请求的 scope 子集。空 [] = 允许全部已定义 scope(默认,向后兼容);
   // admin 裁剪后只允许列出的。运行时 device_authorization 校验:请求的 scope 必须 ∈ 此集合。
   allowedScopes: text("allowed_scopes").array().notNull().default([]),
+  // RFC 7591 client_metadata(RFC 7591 §2):注册时声明,authorization_code 流程校验用
+  redirectUris: text("redirect_uris").array().notNull().default([]), // 允许的回调地址
+  grantTypes: text("grant_types").array().notNull().default([]), // 该 client 允许的 grant_type
+  tokenEndpointAuthMethod: text("token_endpoint_auth_method").notNull().default("client_secret_basic"), // client 认证方式
 });
 
 // ---------- scopes(全局 scope 定义) ----------

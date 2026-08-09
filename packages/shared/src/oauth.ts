@@ -26,7 +26,7 @@ export const TokenResponseSchema = z.object({
 });
 export type TokenResponse = z.infer<typeof TokenResponseSchema>;
 
-// RFC 6749 §5.2 / RFC 8628 §3.5 错误码
+// RFC 6749 §5.2 / §4.1.2.1 / RFC 8628 §3.5 错误码
 export const OAuthErrorCodeSchema = z.enum([
   "authorization_pending",
   "slow_down",
@@ -36,6 +36,8 @@ export const OAuthErrorCodeSchema = z.enum([
   "invalid_client",
   "invalid_request",
   "unsupported_grant_type",
+  "unsupported_response_type",
+  "unauthorized_client",
   "invalid_scope",
 ]);
 export type OAuthErrorCode = z.infer<typeof OAuthErrorCodeSchema>;

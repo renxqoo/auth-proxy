@@ -14,6 +14,8 @@ import { ScopeRepo } from "./scopeRepo.js";
 import type { ScopeRecord } from "./scopeRepo.js";
 import { RoutePolicyRepo } from "./routePolicyRepo.js";
 import type { RoutePolicyRecord } from "./routePolicyRepo.js";
+import { AuthCodeRepo } from "./authCodeRepo.js";
+import type { AuthCodeRecord } from "./authCodeRepo.js";
 
 export type {
   SessionData,
@@ -23,6 +25,7 @@ export type {
   AdminRecord,
   ScopeRecord,
   RoutePolicyRecord,
+  AuthCodeRecord,
 };
 
 let sessionRepo: SessionRepo | null = null;
@@ -34,6 +37,7 @@ let tokenRepo: TokenRepo | null = null;
 let adminRepo: AdminRepo | null = null;
 let scopeRepo: ScopeRepo | null = null;
 let routePolicyRepo: RoutePolicyRepo | null = null;
+let authCodeRepo: AuthCodeRepo | null = null;
 
 export function getSessionRepo(): SessionRepo {
   if (!sessionRepo) sessionRepo = new SessionRepo();
@@ -70,4 +74,8 @@ export function getScopeRepo(): ScopeRepo {
 export function getRoutePolicyRepo(): RoutePolicyRepo {
   if (!routePolicyRepo) routePolicyRepo = new RoutePolicyRepo();
   return routePolicyRepo;
+}
+export function getAuthCodeRepo(): AuthCodeRepo {
+  if (!authCodeRepo) authCodeRepo = new AuthCodeRepo();
+  return authCodeRepo;
 }

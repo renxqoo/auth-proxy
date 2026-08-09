@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { TokenResponse } from "@auth-proxy/shared";
 import { config } from "../config.js";
 import {
@@ -7,6 +8,7 @@ import {
   refreshExpiry,
   updateDeviceCode,
 } from "../deviceCodeStore.js";
+import { findAuthCode, consumeAuthCode } from "../authCodeStore.js";
 import {
   createSession,
   findSessionByRefreshId,
@@ -28,6 +30,77 @@ import {
 const DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
 
 /**
+ * PKCE S256 校验:base64url(sha256(code_verifier)) === code_challenge?
+ * timingSafeEqual 比对(防 timing 攻击)。
+ */
+function verifyPkce(codeVerifier: string, codeChallenge: string): boolean {
+  const computed = createHash("sha256").update(codeVerifier).digest("base64url");
+  const a = Buffer.from(computed);
+  const b = Buffer.from(codeChallenge);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+/**
+ * authorization_code grant(RFC 6749 §4.1.3 + PKCE RFC 7636)。
+ * 公开 client 可能无 secret → 按 code 记录的 clientId 认证。
+ */
+async function handleAuthCodeGrant(
+  c: Context,
+  form: Record<string, string>,
+): Promise<Response> {
+  const code = form.code;
+  const redirectUri = form.redirect_uri;
+  const clientIdForm = form.client_id;
+  const codeVerifier = form.code_verifier;
+
+  if (!code) {
+    return oauthError(c, "invalid_request", "code required");
+  }
+  if (!codeVerifier) {
+    return oauthError(c, "invalid_request", "code_verifier required (PKCE)");
+  }
+
+  const rec = await findAuthCode(code);
+  if (!rec || rec.status !== "authorized" || !rec.companyToken) {
+    return oauthError(c, "invalid_grant", "code invalid, expired, or already used");
+  }
+
+  // client_id 校验(公开 client:form 里的 client_id 须 = code 记录的 clientId)
+  if (clientIdForm && clientIdForm !== rec.clientId) {
+    return oauthError(c, "invalid_grant", "client_id mismatch");
+  }
+
+  // redirect_uri 校验:必须与 /authorize 时的一致(RFC 6749 §4.1.3)
+  if (redirectUri !== rec.redirectUri) {
+    return oauthError(c, "invalid_grant", "redirect_uri mismatch");
+  }
+
+  // PKCE S256 校验
+  if (!verifyPkce(codeVerifier, rec.codeChallenge)) {
+    return oauthError(c, "invalid_grant", "PKCE verification failed");
+  }
+
+  // scope 收窄(层 2:用户权限)
+  const grantedScope = await narrowScope(rec.scope, rec.companyToken.user.scopes);
+  if (grantedScope === null) {
+    return oauthError(c, "invalid_scope", "requested scope exceeds user's granted permissions");
+  }
+
+  // 消费授权码(一次性)
+  const consumed = await consumeAuthCode(code);
+  if (!consumed) {
+    return oauthError(c, "invalid_grant", "code already consumed");
+  }
+
+  // 创建 session + 签发 token
+  const session = await createSession(rec.companyToken, grantedScope, rec.clientId);
+  return c.json(
+    await issueTokenResponse(session.sessionId, session.refreshId, grantedScope, session.data.clientId),
+  );
+}
+
+/**
  * POST /token —— 换 token(RFC 8628 §3.4 + RFC 6749 §6 刷新)。
  * 支持两种 grant:
  *   A. device_code   —— CLI 轮询,用户已登录则签发 JWT
@@ -38,6 +111,13 @@ export const token = new Hono();
 token.post("/", async (c) => {
   const form = await c.req.parseBody();
   const grantType = String(form.grant_type ?? "");
+
+  // authorization_code grant:public client(PKCE)可能无 secret,
+  // 按 code 记录的 clientId 认证(在 handleAuthCodeGrant 里校验)。
+  // 其它 grant(device_code/refresh_token)走标准 client 认证(Basic/body secret)。
+  if (grantType === "authorization_code") {
+    return handleAuthCodeGrant(c, form as Record<string, string>);
+  }
 
   const clientId = await verifyClient(
     c.req.header("Authorization"),

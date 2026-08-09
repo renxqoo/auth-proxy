@@ -4,15 +4,29 @@ import { getAppRepo, getTokenRepo } from "../repos/index.js";
 import { enforceRateLimit } from "../middleware/rateLimit.js";
 
 /**
- * POST /register —— 动态客户端注册。
+ * POST /register —— RFC 7591 动态客户端注册。
  *
- * CLI 用注册令牌换取独立的 clientId/clientSecret(每台机器一份)。
- * - body: { registrationToken: string, name?: string }
- * - 校验令牌有效(存在 + 未吊销 + 未过期)
- * - 生成 cli_xxx / secret_xxx,appRepo.create(hash 存 secret)
- * - 返回明文 clientId/clientSecret(仅此一次;中间层只存 hash)
+ * 准入:保留 registrationToken(管理员预生成,防任意注册)。
+ * 请求体(RFC 7591 §2 client_metadata + 准入令牌):
+ *   { registrationToken, client_name, redirect_uris, grant_types,
+ *     response_types, scope, token_endpoint_auth_method }
+ * 响应(RFC 7591 §3.2,snake_case):
+ *   { client_id, client_secret, client_id_issued_at, client_secret_expires_at(=0),
+ *     client_name, redirect_uris, grant_types, response_types, scope,
+ *     token_endpoint_auth_method }
+ * 错误用 invalid_client_metadata(RFC 7591 §3.2.1)。
  */
 export const register = new Hono();
+
+function isUrl(v: unknown): boolean {
+  if (typeof v !== "string") return false;
+  try {
+    const u = new URL(v);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 
 register.post("/", async (c) => {
   // 按 IP 限流(防令牌泄露后被刷)
@@ -34,48 +48,106 @@ register.post("/", async (c) => {
   }
 
   const body = await c.req.json().catch(() => null);
+
+  // 准入:registrationToken 必须有效(原子校验+消费)
   const registrationToken =
     typeof body?.registrationToken === "string"
       ? body.registrationToken.trim()
       : "";
   if (!registrationToken) {
     return c.json(
-      {
-        error: "invalid_request",
-        error_description: "registrationToken required",
-      },
-      400,
+      { error: "invalid_client_metadata", error_description: "registrationToken required" },
+      401,
     );
   }
-
-  // 原子校验并消费令牌(防 TOCTOU 竞态):
-  // 用单条 UPDATE...RETURNING 把"校验有效 + 标记已用 + 计数"合并,
-  // 并发请求里只有一个 RETURNING 非空。返回 tokenId(审计用)。
   const tokenId = await getTokenRepo().consumeSingleUse(registrationToken);
   if (tokenId === null) {
     return c.json(
       {
-        error: "invalid_grant",
+        error: "invalid_client_metadata",
         error_description: "registration token invalid, expired, revoked, or already used",
       },
       401,
     );
   }
 
-  // 生成独立 client 凭据(每台机器一份)
+  // ---- RFC 7591 client_metadata 校验 ----
+  const clientName =
+    typeof body?.client_name === "string" ? body.client_name.trim() : "";
+  if (!clientName || clientName.length > 256) {
+    return c.json(
+      { error: "invalid_client_metadata", error_description: "client_name required (<=256 chars)" },
+      400,
+    );
+  }
+
+  // redirect_uris:可选但若提供必须是 https/http URL 数组(authorization_code 流程需要)
+  const redirectUris = Array.isArray(body?.redirect_uris)
+    ? body.redirect_uris.filter((u: unknown): u is string => typeof u === "string")
+    : [];
+  if (body?.redirect_uris !== undefined) {
+    if (!Array.isArray(body.redirect_uris)) {
+      return c.json(
+        { error: "invalid_client_metadata", error_description: "redirect_uris must be an array" },
+        400,
+      );
+    }
+    for (const u of redirectUris) {
+      if (!isUrl(u)) {
+        return c.json(
+          { error: "invalid_client_metadata", error_description: `invalid redirect_uri: ${u}` },
+          400,
+        );
+      }
+    }
+  }
+
+  // grant_types:可选,默认 [device_code, refresh_token]
+  const grantTypes = Array.isArray(body?.grant_types)
+    ? body.grant_types.filter((g: unknown): g is string => typeof g === "string")
+    : ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"];
+
+  // response_types:可选,默认 ["code"](device flow 无 response_type,但保留)
+  const responseTypes = Array.isArray(body?.response_types)
+    ? body.response_types.filter((r: unknown): r is string => typeof r === "string")
+    : ["code"];
+
+  // scope:可选,client 声明的允许 scope
+  const scope = typeof body?.scope === "string" ? body.scope.trim() : "";
+
+  // token_endpoint_auth_method:默认 client_secret_basic
+  const authMethod =
+    typeof body?.token_endpoint_auth_method === "string"
+      ? body.token_endpoint_auth_method
+      : "client_secret_basic";
+
+  // ---- 生成 client 凭据 ----
   const clientId = "cli_" + randomBytes(12).toString("hex");
   const clientSecret = randomBytes(24).toString("hex");
-  const name =
-    typeof body?.name === "string" && body.name.trim()
-      ? body.name.trim()
-      : "dynamic-client";
   await getAppRepo().create({
     clientId,
     clientSecret,
-    name,
+    name: clientName,
     createdFromTokenId: tokenId,
+    redirectUris,
+    grantTypes,
+    tokenEndpointAuthMethod: authMethod,
   });
 
-  // 明文 secret 仅此一次返回
-  return c.json({ clientId, clientSecret }, 201);
+  // ---- RFC 7591 §3.2 响应(snake_case + 回显 metadata)----
+  return c.json(
+    {
+      client_id: clientId,
+      client_secret: clientSecret,
+      client_id_issued_at: Math.floor(Date.now() / 1000),
+      client_secret_expires_at: 0, // 0 = 永不过期(RFC 7591)
+      client_name: clientName,
+      redirect_uris: redirectUris,
+      grant_types: grantTypes,
+      response_types: responseTypes,
+      ...(scope ? { scope } : {}),
+      token_endpoint_auth_method: authMethod,
+    },
+    201,
+  );
 });
