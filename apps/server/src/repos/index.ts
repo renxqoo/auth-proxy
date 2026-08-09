@@ -12,6 +12,8 @@ import { AdminRepo } from "./adminRepo.js";
 import type { AdminRecord } from "./adminRepo.js";
 import { ScopeRepo } from "./scopeRepo.js";
 import type { ScopeRecord } from "./scopeRepo.js";
+import { RoutePolicyRepo } from "./routePolicyRepo.js";
+import type { RoutePolicyRecord } from "./routePolicyRepo.js";
 
 export type {
   SessionData,
@@ -20,6 +22,7 @@ export type {
   AppRecord,
   AdminRecord,
   ScopeRecord,
+  RoutePolicyRecord,
 };
 
 let sessionRepo: SessionRepo | null = null;
@@ -30,6 +33,7 @@ let auditRepo: AuditRepo | null = null;
 let tokenRepo: TokenRepo | null = null;
 let adminRepo: AdminRepo | null = null;
 let scopeRepo: ScopeRepo | null = null;
+let routePolicyRepo: RoutePolicyRepo | null = null;
 
 export function getSessionRepo(): SessionRepo {
   if (!sessionRepo) sessionRepo = new SessionRepo();
@@ -62,4 +66,8 @@ export function getAdminRepo(): AdminRepo {
 export function getScopeRepo(): ScopeRepo {
   if (!scopeRepo) scopeRepo = new ScopeRepo();
   return scopeRepo;
+}
+export function getRoutePolicyRepo(): RoutePolicyRepo {
+  if (!routePolicyRepo) routePolicyRepo = new RoutePolicyRepo();
+  return routePolicyRepo;
 }

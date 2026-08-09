@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — gateway path-scope policy enforcement (Tier 4, enterprise defense-in-depth)
+- **New `route_policies` table:** maps path patterns to required scopes (e.g. `/api/orders*` → `orders:read`). Managed via admin console.
+- **Gateway now enforces scope before forwarding:** a token must carry the scope the path demands, else `403 insufficient_scope`. Previously the gateway only verified the JWT signature — scope was not checked at the proxy layer.
+- **Default-deny:** paths without a configured policy are blocked (403), forcing explicit configuration. This is the enterprise API-gateway standard (Kong / AWS API Gateway pattern).
+- Wildcard path matching: `/api/orders*` matches `/api/orders` and `/api/orders/123`.
+- Null-scope policies: `scope=null` means "valid token only" (for self-info endpoints like `/me`, `/api/profile`).
+- Method-scoped policies: `method` can be `GET`/`POST`/null (null = all methods).
+- Admin console: new "路径策略" (Route Policies) management page.
+- New endpoints: `GET/POST/DELETE /admin/web/route-policies`.
+- Migration `0007_rich_inhumans.sql`. Seed inserts 6 default policies (company-mock endpoints).
+- Tests: `gateway.scope-policy.test.ts` (8 tests covering allow/deny/default-deny/wildcard/method).
+- This closes the gap where the gateway was a transparent pipe for scope — now it's a real authorization boundary independent of the resource server.
+
 ### Added — three-tier dynamic scope management (OAuth 2.1)
 - **New `scopes` table (Tier 1):** global scope definitions stored in the DB, manageable via admin console (`GET/POST/DELETE /scopes`). Seed inserts 7 defaults (`orders:read`, `admin`, system scopes, etc.). Replaces the static env-var whitelist as the source of truth (env `ALLOWED_SCOPES` retained as fallback when table is empty).
 - **Client-level scope binding (Tier 3):** `apps.allowed_scopes` column lets admins restrict each client to a scope subset (empty = all, default). Enforced at `/device_authorization`. Closes the gap where any client could request any whitelisted scope (e.g. `admin`).

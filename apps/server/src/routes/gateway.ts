@@ -5,7 +5,8 @@ import { getRefresher, CompanyAuthError } from "../companyTokenRefresher.js";
 import { bearerOf, verifyAccessToken } from "../jwt.js";
 import { oauthError } from "../oauthHelpers.js";
 import { enforceRateLimit } from "../middleware/rateLimit.js";
-import { getAuditRepo } from "../repos/index.js";
+import { getAuditRepo, getRoutePolicyRepo } from "../repos/index.js";
+import { findMatchingPolicy } from "../repos/routePolicyRepo.js";
 
 /**
  * /proxy/* —— API Gateway。CLI 拿业务数据走这里。
@@ -67,8 +68,37 @@ gateway.all("/*", async (c) => {
 
   // 3. 计算转发目标 URL:去掉 /proxy 前缀
   const url = new URL(c.req.url);
-  const upstreamPath = url.pathname.replace(/^\/proxy/, "") + url.search;
+  const upstreamPathNoQuery = url.pathname.replace(/^\/proxy/, "");
+  const upstreamPath = upstreamPathNoQuery + url.search;
   const target = `${config.companyApiBase}${upstreamPath}`;
+
+  // 3.5 路径 scope 策略校验(层 4,企业纵深防御):
+  // 默认拒绝 —— 没匹配到任何策略的路径直接 403,强制所有路径显式配策略。
+  // 匹配到策略但 token.scope 不含所需 scope → 403 insufficient_scope。
+  // 策略 scope=null → 只需有效 token(已验),放行。
+  const policies = await getRoutePolicyRepo().getPolicies();
+  const matched = findMatchingPolicy(policies, upstreamPathNoQuery, c.req.method);
+  if (!matched) {
+    return c.json(
+      {
+        error: "insufficient_scope",
+        error_description: `no route policy configured for ${upstreamPathNoQuery}`,
+      },
+      403,
+    );
+  }
+  if (matched.scope) {
+    const tokenScopes = new Set((claims.scope ?? "").split(/\s+/).filter(Boolean));
+    if (!tokenScopes.has(matched.scope)) {
+      return c.json(
+        {
+          error: "insufficient_scope",
+          error_description: `requires scope: ${matched.scope}`,
+        },
+        403,
+      );
+    }
+  }
 
   // 4. 透传请求(方法/headers/body)
   const upstreamHeaders = new Headers();

@@ -6,6 +6,7 @@ import {
   getAppRepo,
   getAuditRepo,
   getScopeRepo,
+  getRoutePolicyRepo,
 } from "../repos/index.js";
 import { revokeSessionsByClient } from "../sessionStore.js";
 import { safeError } from "../config.js";
@@ -287,6 +288,61 @@ adminWeb.delete("/scopes/:id", async (c) => {
     );
   }
   const ok = await getScopeRepo().delete(id);
+  return ok ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
+});
+
+// ---------- 路径策略管理(层 4:gateway scope 校验)----------
+adminWeb.get("/route-policies", async (c) => {
+  const list = await getRoutePolicyRepo().list();
+  return c.json({ policies: list });
+});
+
+// body: { pattern, scope?, method?, description? }
+// scope 为空/null → 只需有效登录的策略(如 /me);非空须校验 ∈ 全局定义
+adminWeb.post("/route-policies", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const pattern = typeof body?.pattern === "string" ? body.pattern.trim() : "";
+  const scopeRaw = typeof body?.scope === "string" ? body.scope.trim() : "";
+  const method = typeof body?.method === "string" ? body.method.trim() : "";
+  const description =
+    typeof body?.description === "string" ? body.description.trim() : "";
+  if (!pattern || pattern.length > MAX_NAME_LEN) {
+    return c.json(
+      {
+        error: "invalid_request",
+        error_description: "pattern required (<=256 chars)",
+      },
+      400,
+    );
+  }
+  const scope = scopeRaw || null;
+  // scope 非空时校验必须在全局定义内
+  if (scope) {
+    const { names: globalNames } = await getScopeRepo().getSets();
+    if (globalNames.size > 0 && !globalNames.has(scope)) {
+      return c.json(
+        {
+          error: "invalid_request",
+          error_description: `scope ${scope} is not defined in global scopes`,
+        },
+        400,
+      );
+    }
+  }
+  const rec = await getRoutePolicyRepo().create({
+    pattern,
+    scope,
+    method: method || null,
+    description,
+  });
+  return c.json(rec, 201);
+});
+
+adminWeb.delete("/route-policies/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  const existing = await getRoutePolicyRepo().findById(id);
+  if (!existing) return c.json({ error: "not_found" }, 404);
+  const ok = await getRoutePolicyRepo().delete(id);
   return ok ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
 });
 

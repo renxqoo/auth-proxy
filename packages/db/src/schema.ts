@@ -76,6 +76,23 @@ export const scopes = pgTable("scopes", {
     .defaultNow(),
 });
 
+// ---------- route_policies(网关路径→scope 策略) ----------
+// 企业级纵深防御之层 4:gateway 转发前校验 token.scope 是否覆盖该路径所需 scope。
+// 默认拒绝:没匹配到任何策略的路径 → gateway 直接 403(强制所有路径显式配策略)。
+// pattern 用简单通配符:/api/orders* 匹配 /api/orders 和 /api/orders/123。
+// scope 为 null 表示"只需有效 token,不要业务 scope"(如 /me、/api/profile 自身信息)。
+// method 为 null 表示匹配所有 HTTP 方法。
+export const routePolicies = pgTable("route_policies", {
+  id: serial("id").primaryKey(),
+  pattern: text("pattern").notNull(), // "/api/orders*"(去掉 /proxy 前缀后的上游路径)
+  scope: text("scope"), // "orders:read";null = 只验登录
+  method: text("method"), // "GET"/"POST"/null(=null 匹配所有方法)
+  description: text("description"),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
 // ---------- users ----------
 export const users = pgTable("users", {
   id: serial("id").primaryKey(),
@@ -193,6 +210,8 @@ export type App = typeof apps.$inferSelect;
 export type NewApp = typeof apps.$inferInsert;
 export type Scope = typeof scopes.$inferSelect;
 export type NewScope = typeof scopes.$inferInsert;
+export type RoutePolicy = typeof routePolicies.$inferSelect;
+export type NewRoutePolicy = typeof routePolicies.$inferInsert;
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type Session = typeof sessions.$inferSelect;

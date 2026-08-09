@@ -2,7 +2,7 @@ import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { eq } from "drizzle-orm";
-import { signingKeys, scopes } from "./schema.js";
+import { signingKeys, scopes, routePolicies } from "./schema.js";
 
 /**
  * 种子数据:仅 RS256 密钥对(若无 active 则生成一对)。
@@ -72,6 +72,28 @@ async function main() {
     await db.insert(scopes).values(s).onConflictDoNothing();
   }
   console.log(`[db] ensured ${defaultScopes.length} default scopes`);
+
+  // 种子默认路由策略(gateway 默认拒绝,故必须配齐 company-mock 现有接口)
+  // pattern 是去掉 /proxy 前缀后的上游路径;scope=null 表示只需有效登录。
+  // 用 pattern 做幂等键(重复 seed 不报错):先查再插
+  const defaultPolicies = [
+    { pattern: "/api/orders*", scope: "orders:read", method: "GET", description: "读订单列表/详情" },
+    { pattern: "/api/products*", scope: "products:read", method: "GET", description: "读商品目录" },
+    { pattern: "/api/invoices*", scope: "invoices:read", method: "GET", description: "读发票" },
+    { pattern: "/api/admin/users", scope: "admin", method: "GET", description: "用户列表(管理员)" },
+    { pattern: "/me", scope: null, method: "GET", description: "当前用户信息(只需登录)" },
+    { pattern: "/api/profile", scope: null, method: "GET", description: "个人资料(只需登录)" },
+  ];
+  for (const p of defaultPolicies) {
+    const exists = await db
+      .select({ id: routePolicies.id })
+      .from(routePolicies)
+      .where(eq(routePolicies.pattern, p.pattern));
+    if (exists.length === 0) {
+      await db.insert(routePolicies).values(p);
+    }
+  }
+  console.log(`[db] ensured ${defaultPolicies.length} default route policies`);
 
   await conn.end();
   console.log("[db] seed done ✓ (admin 账号需手动创建,见文件头注释)");

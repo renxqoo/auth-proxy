@@ -297,10 +297,11 @@ Full ops guide (backup/restore, alerting, logs, migrations, troubleshooting): [d
 - **`client_secret` stored scrypt-hashed**, never in plaintext.
 - **CSRF protection** — double-submit cookie on `/verify/login`.
 - **Refresh-token rotation + reuse detection** — each refresh issues a new refresh token; reusing an old one past `REFRESH_REUSE_GRACE_SEC` (30s) auto-revokes the session.
-- **Scope enforcement (three-tier, OAuth 2.1)** — scope authorization is dynamic and stored in the DB, manageable via the admin console:
+- **Scope enforcement (four-tier, OAuth 2.1)** — scope authorization is dynamic and stored in the DB, manageable via the admin console:
   - **Tier 1 (global definition):** scopes are defined in the `scopes` table (seed defaults: `orders:read`, `admin`, etc.); requested scopes must exist here → else `invalid_scope`.
   - **Tier 3 (client binding):** each client (`apps.allowed_scopes`) can be restricted to a scope subset; empty = all defined scopes (default). Enforced at `/device_authorization`.
   - **Tier 2 (user narrowing):** at token issuance, requested scopes are intersected with the user's actual permissions (`user.scopes`); over-scoped requests → `invalid_scope`.
+  - **Tier 4 (gateway path policy):** the gateway enforces `route_policies` (path-pattern → required scope) before forwarding — a token must carry the scope the path demands, else `403 insufficient_scope`. **Default-deny**: paths without a policy are blocked (forces explicit configuration). This is defense-in-depth: even if a resource server forgets to check permissions, the gateway blocks unauthorized access.
   - System scopes (`offline_access`, `company.api`) are auto-granted and exempt from tiers 2 & 3.
 - **Rate limiting** — login/verify by IP, `/token` by client, `/proxy` by session.
 - **Production config validation** — `assertProductionConfig()` rejects a weak `ADMIN_SESSION_SECRET` at startup.

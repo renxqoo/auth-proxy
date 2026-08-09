@@ -48,6 +48,12 @@ vi.mock("../src/repos/index.js", () => ({
   getAuditRepo: () => ({
     writeApiLog: vi.fn(async () => {}),
   }),
+  // 本测试聚焦响应头过滤/鉴权,不测 scope 策略 → 给一个全放行策略
+  getRoutePolicyRepo: () => ({
+    getPolicies: vi.fn(async () => [
+      { id: 1, pattern: "/*", scope: null, method: null, description: null, createdAt: new Date() },
+    ]),
+  }),
 }));
 
 // 控制 fetch 返回(模拟上游响应)
