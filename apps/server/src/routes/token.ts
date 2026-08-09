@@ -77,9 +77,10 @@ token.post("/", async (c) => {
 /**
  * scope 收窄:把请求的 scope 限制在用户实际拥有的权限内。
  *
- * - offline_access 是中间层续期所需的 scope,不计入用户权限比对(自动放行)。
+ * - 系统 scope(config.systemScopes,如 offline_access / company.api)是中间层
+ *   自身管理的,不属于公司应用返回的用户权限(user.scopes),不参与权限比对(自动放行)。
  * - 请求的其它 scope 必须全部 ∈ userScopes;否则返回 null(调用方返 invalid_scope)。
- * - 返回值:收窄后的 scope 字符串(保留请求顺序,含 offline_access)。
+ * - 返回值:收窄后的 scope 字符串(保留请求顺序,含系统 scope)。
  *
  * 设计:授权边界在签发时生效 —— 即便请求了超出权限的 scope,token 里也
  * 只会包含用户实际拥有的。但为了符合 OAuth 的"最小惊讶"并避免静默降级,
@@ -88,8 +89,11 @@ token.post("/", async (c) => {
 function narrowScope(requested: string, userScopes: string[]): string | null {
   const requestedScopes = requested.split(/\s+/).filter((s) => s.length > 0);
   const userScopeSet = new Set(userScopes);
+  const systemScopeSet = new Set(
+    config.systemScopes.split(/\s+/).filter(Boolean),
+  );
   for (const s of requestedScopes) {
-    if (s === "offline_access") continue; // 中间层自身 scope,放行
+    if (systemScopeSet.has(s)) continue; // 系统 scope,放行
     if (!userScopeSet.has(s)) return null; // 越权 → 拒绝
   }
   // 保留请求顺序(去重)

@@ -113,12 +113,22 @@ export const config = {
   /**
    * 允许的 scope 白名单(空格分隔)。device_authorization 入口校验:
    * 请求的 scope 超出此集合 → invalid_scope(RFC 6749 §3.3)。
-   * 注:offline_access 由入口自动补上,无需在此显式列出(但列了也不冲突)。
+   * 注:offline_access 由入口自动补上,无需客户端显式请求,但列在白名单内可兼容。
+   * company.api 是中间层聚合 scope(代表"公司应用 API 访问权",非单一公司权限),
+   * 客户端(crmb)会请求它,故列入默认白名单。
    */
   allowedScopes: required(
     "ALLOWED_SCOPES",
-    "orders:read orders:write products:read invoices:read admin offline_access",
+    "company.api orders:read orders:write products:read invoices:read admin offline_access",
   ),
+  /**
+   * 系统 scope 集合(空格分隔)。这些 scope 是中间层自身管理的,不属于公司应用
+   * 返回的用户权限(user.scopes),故在 narrowScope 收窄时不参与用户权限比对:
+   *   - offline_access:中间层签发 refresh_token 所需
+   *   - company.api:中间层聚合 scope(代表可经 proxy 访问公司应用)
+   * 其余 scope 必须是用户实际拥有的,否则 invalid_scope。
+   */
+  systemScopes: required("SYSTEM_SCOPES", "offline_access company.api"),
   // device flow
   deviceCodeTtlSec: num("DEVICE_CODE_TTL", 600), // 10min
   devicePollIntervalSec: num("DEVICE_POLL_INTERVAL", 5),

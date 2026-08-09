@@ -106,4 +106,14 @@ describe("RFC 6749 §3.3: /device_authorization scope 入口白名单校验", ()
     const r = await postScope("offline_access");
     expect(r.status).toBe(200);
   });
+
+  it("company.api(中间层聚合 scope)→ 200", async () => {
+    const r = await postScope("company.api");
+    expect(r.status).toBe(200);
+  });
+
+  it("company.api + offline_access(crm 客户端实际请求)→ 200", async () => {
+    const r = await postScope("company.api offline_access");
+    expect(r.status).toBe(200);
+  });
 });
