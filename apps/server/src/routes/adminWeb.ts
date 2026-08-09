@@ -8,7 +8,9 @@ import {
   getScopeRepo,
   getRoutePolicyRepo,
 } from "../repos/index.js";
-import { revokeSessionsByClient } from "../sessionStore.js";
+import { revokeSessionsByClient, createSession } from "../sessionStore.js";
+import { loginAsCompany } from "../companyAuth.js";
+import { signAccessToken, signRefreshToken } from "../jwt.js";
 import { safeError } from "../config.js";
 import {
   requireAdminSession,
@@ -344,6 +346,110 @@ adminWeb.delete("/route-policies/:id", async (c) => {
   if (!existing) return c.json({ error: "not_found" }, 404);
   const ok = await getRoutePolicyRepo().delete(id);
   return ok ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
+});
+
+// ---------- admin 签发 agent token(sandbox/CI 场景)----------
+// 管理员为指定用户预签发 token,注入 sandbox 环境变量,无需 device flow。
+// 审计:记录谁(admin)为谁(username)签发了什么 scope 的 token。
+adminWeb.post("/issue-token", async (c) => {
+  const adminSession = c.get("adminSession");
+  const body = await c.req.json().catch(() => null);
+  const username = typeof body?.username === "string" ? body.username.trim() : "";
+  const scopeRaw = typeof body?.scope === "string" ? body.scope.trim() : "";
+  const expiresInSec = Number(body?.expiresInSec);
+
+  if (!username) {
+    return c.json(
+      { error: "invalid_request", error_description: "username required" },
+      400,
+    );
+  }
+
+  // TTL 校验(防永久 token)
+  const ttl =
+    Number.isFinite(expiresInSec) && expiresInSec > 0
+      ? Math.min(expiresInSec, config.agentTokenMaxTtlSec)
+      : config.jwtAccessTtlSec;
+
+  // 1. 通过公司应用管理端点获取该用户的 company token(不需要密码)
+  let companyToken;
+  try {
+    companyToken = await loginAsCompany(username);
+  } catch (e) {
+    safeError("[admin] issue-token: loginAsCompany failed:", e);
+    return c.json(
+      { error: "invalid_request", error_description: `cannot issue token for '${username}'` },
+      400,
+    );
+  }
+
+  // 2. scope 校验(层 1 全局 + 层 2 用户权限收窄)
+  const requestedScope = scopeRaw || "offline_access";
+  const requestedScopes = requestedScope.split(/\s+/).filter((s: string) => s.length > 0);
+  // 全局定义校验
+  const { names: globalNames } = await getScopeRepo().getSets();
+  if (globalNames.size > 0) {
+    for (const s of requestedScopes) {
+      if (!globalNames.has(s)) {
+        return c.json(
+          { error: "invalid_request", error_description: `unknown scope: ${s}` },
+          400,
+        );
+      }
+    }
+  }
+  // 用户权限收窄:请求的 scope 必须是用户实际拥有的(companyToken.user.scopes)
+  const userScopeSet = new Set(companyToken.user.scopes);
+  const { systemNames } = await getScopeRepo().getSets();
+  const systemSet =
+    systemNames.size > 0
+      ? systemNames
+      : new Set(config.systemScopes.split(/\s+/).filter(Boolean));
+  for (const s of requestedScopes) {
+    if (systemSet.has(s)) continue;
+    if (!userScopeSet.has(s)) {
+      return c.json(
+        {
+          error: "invalid_request",
+          error_description: `user '${username}' does not have scope: ${s}`,
+        },
+        400,
+      );
+    }
+  }
+  // offline_access 自动补
+  if (!requestedScopes.includes("offline_access")) {
+    requestedScopes.push("offline_access");
+  }
+  const finalScope = requestedScopes.join(" ");
+
+  // 3. 创建 session(标记为 agent 类型)
+  const session = await createSession(companyToken, finalScope, `admin-issued`);
+
+  // 4. 签发 JWT + refresh token
+  const [accessToken, refreshToken] = await Promise.all([
+    signAccessToken(session.sessionId, finalScope, `admin-issued`),
+    signRefreshToken(session.sessionId, session.refreshId),
+  ]);
+
+  // 5. 审计:记录谁为谁签了什么
+  void getAuditRepo().writeLoginLog({
+    userCode: "",
+    username: `${username} [ADMIN-ISSUED by ${adminSession.username}]`,
+    clientId: "admin-issued",
+    success: true,
+  });
+
+  return c.json({
+    access_token: accessToken,
+    token_type: "Bearer",
+    expires_in: ttl,
+    refresh_token: refreshToken,
+    scope: finalScope,
+    sessionId: session.sessionId,
+    user: { id: companyToken.user.id, name: companyToken.user.name },
+    hint: "Inject this token into the agent's environment (e.g. RXCLI_BEARER_TOKEN or credentials file)",
+  });
 });
 
 // ---------- 审计 ----------

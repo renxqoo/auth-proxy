@@ -64,6 +64,13 @@
       "when": 1786309053613,
       "tag": "0008_slimy_steel_serpent",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786311975607,
+      "tag": "0009_nosy_exiles",
+      "breakpoints": true
     }
   ]
 }

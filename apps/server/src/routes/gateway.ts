@@ -60,7 +60,19 @@ gateway.all("/*", async (c) => {
   }
 
   // 2. 取(必要时刷新)company access token
+  // 机器/agent session(client_credentials / admin 签发)无真实 company token → 跳过刷新
   let companyAccessToken: string;
+  if (session.sessionType === "machine" || session.sessionType === "agent") {
+    // 机器 session 不转发到公司应用(它没有 company token)
+    // 这种 session 的 gateway 访问应该走不需要 company token 的路径(或在此拒绝)
+    return c.json(
+      {
+        error: "invalid_request",
+        error_description: "machine/agent sessions cannot proxy to company app",
+      },
+      403,
+    );
+  }
   try {
     companyAccessToken = await getRefresher().ensureFresh(claims.sub);
   } catch (e) {

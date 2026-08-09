@@ -41,6 +41,32 @@ export async function createSession(
   return { sessionId, refreshId, data };
 }
 
+/**
+ * 创建机器 session(client_credentials / agent 预签发用)。
+ * 不需要真实的 company token。
+ */
+export async function createMachineSession(params: {
+  userId: number;
+  companyUser: { id: string; name: string; scopes: string[] };
+  scope: string;
+  clientId: string;
+  sessionType: string; // "machine" | "agent"
+}): Promise<CreatedSession> {
+  const repo = getSessionRepo();
+  const sessionId = SESSION_PREFIX + randomBytes(16).toString("hex");
+  const refreshId = REFRESH_PREFIX + randomBytes(16).toString("hex");
+  const data = await repo.createMachine({
+    sessionId,
+    refreshId,
+    userId: params.userId,
+    clientId: params.clientId,
+    companyUser: params.companyUser,
+    scope: params.scope,
+    sessionType: params.sessionType,
+  });
+  return { sessionId, refreshId, data };
+}
+
 export async function findSessionBySessionId(
   sessionId: string,
 ): Promise<SessionData | null> {

@@ -2,7 +2,7 @@ import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { eq } from "drizzle-orm";
-import { signingKeys, scopes, routePolicies } from "./schema.js";
+import { signingKeys, scopes, routePolicies, users } from "./schema.js";
 
 /**
  * 种子数据:仅 RS256 密钥对(若无 active 则生成一对)。
@@ -72,6 +72,17 @@ async function main() {
     await db.insert(scopes).values(s).onConflictDoNothing();
   }
   console.log(`[db] ensured ${defaultScopes.length} default scopes`);
+
+  // 预置 system 用户(client_credentials 的机器 session 用,无真实公司用户)
+  await db
+    .insert(users)
+    .values({
+      companyUserId: "__system_client_credentials__",
+      name: "System (client_credentials)",
+      scopes: [],
+    })
+    .onConflictDoNothing();
+  console.log("[db] ensured system user for client_credentials");
 
   // 种子默认路由策略(gateway 默认拒绝,故必须配齐 company-mock 现有接口)
   // pattern 是去掉 /proxy 前缀后的上游路径;scope=null 表示只需有效登录。

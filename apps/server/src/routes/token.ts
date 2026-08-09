@@ -11,6 +11,7 @@ import {
 import { findAuthCode, consumeAuthCode } from "../authCodeStore.js";
 import {
   createSession,
+  createMachineSession,
   findSessionByRefreshId,
   findRefreshHistory,
   recordRefreshRotation,
@@ -20,7 +21,10 @@ import {
 } from "../sessionStore.js";
 import { oauthError, verifyClient } from "../oauthHelpers.js";
 import { enforceRateLimit } from "../middleware/rateLimit.js";
-import { getAuditRepo, getScopeRepo } from "../repos/index.js";
+import { getAuditRepo, getScopeRepo, getAppRepo } from "../repos/index.js";
+import { getDb } from "../infra.js";
+import { users } from "@auth-proxy/db";
+import { eq } from "drizzle-orm";
 import {
   signAccessToken,
   signRefreshToken,
@@ -144,6 +148,9 @@ token.post("/", async (c) => {
   if (grantType === DEVICE_CODE_GRANT) {
     return handleDeviceCodeGrant(c, form as Record<string, string>);
   }
+  if (grantType === "client_credentials") {
+    return handleClientCredentialsGrant(c, form as Record<string, string>, clientId);
+  }
   if (grantType === "refresh_token") {
     return handleRefreshGrant(c, form as Record<string, string>);
   }
@@ -153,6 +160,77 @@ token.post("/", async (c) => {
     `unsupported grant_type: ${grantType}`,
   );
 });
+
+/**
+ * client_credentials grant(RFC 6749 §4.4)— 机器对机器。
+ * 无用户参与;用 client_id + client_secret 认证。
+ * session 标记为 "machine",company token 占位(不需要)。
+ */
+async function handleClientCredentialsGrant(
+  c: Context,
+  form: Record<string, string>,
+  clientId: string,
+): Promise<Response> {
+  // scope 校验(层 1 全局 + 层 3 client 绑定;无用户 scope 收窄,因为无用户)
+  const requestedScope = form.scope ?? "";
+  const requestedScopes = requestedScope.split(/\s+/).filter((s) => s.length > 0);
+  const { names: globalNames, systemNames } = await getScopeRepo().getSets();
+  const globalAllowed =
+    globalNames.size > 0
+      ? globalNames
+      : new Set(config.allowedScopes.split(/\s+/).filter(Boolean));
+  const systemSet =
+    systemNames.size > 0
+      ? systemNames
+      : new Set(config.systemScopes.split(/\s+/).filter(Boolean));
+  const app = await getAppRepo().findByClientId(clientId);
+  const clientAllowed =
+    app && app.allowedScopes.length > 0 ? new Set(app.allowedScopes) : null;
+  for (const s of requestedScopes) {
+    if (!globalAllowed.has(s)) {
+      return oauthError(c, "invalid_scope", `unknown or disallowed scope: ${s}`);
+    }
+    if (clientAllowed && !systemSet.has(s) && !clientAllowed.has(s)) {
+      return oauthError(c, "invalid_scope", `scope ${s} not allowed for this client`);
+    }
+  }
+  // offline_access 自动补
+  const finalScopes = [...requestedScopes];
+  if (!finalScopes.includes("offline_access")) finalScopes.push("offline_access");
+  const finalScope = finalScopes.join(" ");
+
+  // 查 system 用户(client_credentials 的虚拟用户)
+  const db = getDb();
+  const sysUser = await db
+    .select()
+    .from(users)
+    .where(eq(users.companyUserId, "__system_client_credentials__"));
+  if (sysUser.length === 0) {
+    return oauthError(c, "invalid_grant", "system user not seeded");
+  }
+
+  // 创建机器 session
+  const session = await createMachineSession({
+    userId: sysUser[0]!.id,
+    companyUser: {
+      id: sysUser[0]!.companyUserId,
+      name: sysUser[0]!.name,
+      scopes: [],
+    },
+    scope: finalScope,
+    clientId,
+    sessionType: "machine",
+  });
+
+  return c.json(
+    await issueTokenResponse(
+      session.sessionId,
+      session.refreshId,
+      finalScope,
+      session.data.clientId,
+    ),
+  );
+}
 
 /**
  * scope 收窄(层 2:用户权限):把请求的 scope 限制在用户实际拥有的权限内。

@@ -134,6 +134,8 @@ export const config = {
   devicePollIntervalSec: num("DEVICE_POLL_INTERVAL", 5),
   // authorization_code 流程(RFC 6749 §4.1 + PKCE RFC 7636)
   authCodeTtlSec: num("AUTH_CODE_TTL", 120), // 授权码有效期(秒);OAuth BCP 建议短
+  // admin 签发 agent token 的最大 TTL(秒)。防永久 token。
+  agentTokenMaxTtlSec: num("AGENT_TOKEN_MAX_TTL", 86400), // 24h
   // refresh 重用检测:旧 refresh 在此窗口内复用视为合法(容忍并发/重试),
   // 超过窗口视为泄露 → 吊销 session。OAuth 安全 BCP 建议 30s-数分钟。
   refreshReuseGraceSec: num("REFRESH_REUSE_GRACE_SEC", 30),

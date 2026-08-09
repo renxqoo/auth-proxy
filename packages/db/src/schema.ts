@@ -126,6 +126,8 @@ export const sessions = pgTable("sessions", {
   }).notNull(),
   scope: text("scope").notNull(),
   revoked: boolean("revoked").notNull().default(false),
+  // session 类型:user=用户登录 / machine=client_credentials / agent=admin 预签发
+  sessionType: text("session_type").notNull().default("user"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

@@ -22,6 +22,7 @@ export interface SessionData {
   companyTokenExpiresAt: number; // unix ms
   scope: string;
   revoked: boolean;
+  sessionType: string; // "user" | "machine" | "agent"
 }
 
 /** company token 的最小契约(repo 不依赖 shared 的完整类型)。 */
@@ -74,6 +75,7 @@ export class SessionRepo {
     companyToken: CompanyTokenFields;
     companyTokenExpiresAt: number;
     scope: string;
+    sessionType?: string; // 默认 "user"
   }): Promise<SessionData> {
     const db = getDb();
     const [row] = await db
@@ -87,6 +89,40 @@ export class SessionRepo {
         companyRefreshToken: params.companyToken.refresh_token,
         companyTokenExpiresAt: new Date(params.companyTokenExpiresAt),
         scope: params.scope,
+        sessionType: params.sessionType ?? "user",
+      })
+      .returning();
+    const data = await this.hydrate(row!, params.companyUser);
+    await this.cacheSet(data);
+    return data;
+  }
+
+  /**
+   * 创建机器 session(client_credentials / agent 用)。
+   * 不需要真实的 company token(company 字段存占位空值)。
+   */
+  async createMachine(params: {
+    sessionId: string;
+    refreshId: string;
+    userId: number;
+    clientId: string;
+    companyUser: { id: string; name: string; scopes: string[] };
+    scope: string;
+    sessionType: string;
+  }): Promise<SessionData> {
+    const db = getDb();
+    const [row] = await db
+      .insert(sessions)
+      .values({
+        sessionId: params.sessionId,
+        userId: params.userId,
+        clientId: params.clientId,
+        refreshId: params.refreshId,
+        companyAccessToken: "__none__",
+        companyRefreshToken: "__none__",
+        companyTokenExpiresAt: new Date(Date.now() + 365 * 24 * 3600 * 1000),
+        scope: params.scope,
+        sessionType: params.sessionType,
       })
       .returning();
     const data = await this.hydrate(row!, params.companyUser);
@@ -250,6 +286,7 @@ export class SessionRepo {
       companyTokenExpiresAt: row.companyTokenExpiresAt.getTime(),
       scope: row.scope,
       revoked: row.revoked,
+      sessionType: row.sessionType,
     };
   }
 
