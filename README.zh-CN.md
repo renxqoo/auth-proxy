@@ -1,5 +1,12 @@
 # auth-proxy
 
+[![Build & Push Images](https://github.com/renxqoo/auth-proxy/actions/workflows/build.yml/badge.svg)](https://github.com/renxqoo/auth-proxy/actions/workflows/build.yml)
+[![Deploy](https://github.com/renxqoo/auth-proxy/actions/workflows/deploy.yml/badge.svg)](https://github.com/renxqoo/auth-proxy/actions/workflows/deploy.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D22-green.svg)](https://nodejs.org)
+[![pnpm](https://img.shields.io/badge/pnpm-11-red.svg)](https://pnpm.io)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./CONTRIBUTING.zh-CN.md)
+
 [English](./README.md) · **中文**
 
 OAuth 2.0 设备授权流程鉴权中间层。签发 RS256 JWT 并代理转发到公司应用 —— **公司凭证永不离开中间层**。客户端只持有中间层签发的 JWT,公司 token(`ct_*`)始终留在内部。
@@ -23,15 +30,47 @@ flowchart LR
 
 ## 目录
 
+- [特性](#特性)
+- [技术栈](#技术栈)
 - [架构](#架构)
 - [快速开始](#快速开始)
+- [API 端点](#api-端点)
+- [端到端流程](#端到端流程)
 - [Admin 后台](#admin-后台)
 - [部署](#部署)
 - [运维](#运维)
 - [安全设计](#安全设计)
 - [开发](#开发)
 - [真实公司应用接入](#真实公司应用接入)
+- [贡献](#贡献)
 - [License](#license)
+
+## 特性
+
+- 🔐 **设备授权流程(RFC 8628)** — 专为 CLI 和无头 agent 设计,客户端无需浏览器跳转。
+- 🛡️ **公司凭证永不外泄** — 公司 token(`ct_*`)只存在于中间层内部,客户端拿到的是中间层签发的 JWT。
+- 🔑 **JWT RS256,签名密钥可轮转** — 公钥发布在 `/.well-known/jwks.json`,私钥存 `signing_keys` 表。
+- 🔄 **Refresh token 轮换 + 重用检测** — 旧 refresh 超过宽限窗口被复用 → 自动吊销 session。
+- 🧮 **限流**(Redis 实现)— login 按 IP、`/token` 按 client、`/proxy` 按 session。
+- 🛡️ **CSRF 防护**、scrypt 哈希存储 secret、生产配置校验、首个管理员强随机密码。
+- 📊 **审计日志** — 登录记录(含 `[REUSE]` 重用事件)+ 每一次代理 API 调用。
+- 🖥️ **Admin 管理后台**(Next.js)— 管理注册令牌、客户端、管理员,查看审计日志。
+- 🐳 **一键部署** — `deploy.sh` 或 GitHub Actions CI/CD,GHCR 镜像分发。
+- 🗄️ **自动化运维** — 每日 Postgres 备份 + 健康巡检 cron,部署时自动安装。
+
+## 技术栈
+
+| 层级 | 技术 |
+|------|------|
+| 中间层(`apps/server`) | [Hono](https://hono.dev) 4、[jose](https://github.com/panva/jose) 6(JWT/JWKS)、TypeScript 5 |
+| 管理后台(`apps/admin-web`) | [Next.js](https://nextjs.org) 16、React 19、Tailwind CSS 4、shadcn/ui |
+| 共享契约(`packages/shared`) | [zod](https://zod.dev) 4 |
+| 数据库(`packages/db`) | PostgreSQL、[drizzle-orm](https://orm.drizzle.team) 0.44、drizzle 迁移 |
+| 缓存 / 限流 / device_code 存储 | Redis |
+| Monorepo | pnpm 11 workspaces + [Turborepo](https://turbo.build) 2 |
+| Lint / 格式化 | oxlint + oxfmt |
+| 测试 | Vitest |
+| 部署 | Docker、docker-compose、nginx、GitHub Actions |
 
 ## 架构
 
@@ -63,7 +102,7 @@ server ──► postgres / redis / company-mock(均为内部网络)
 
 ### 前置
 
-- **Node 22+**、**pnpm**(corepack 自动启用)
+- **Node 22+**、**pnpm 11**(corepack 自动启用)
 - **Postgres**、**Redis**(本机已装,或用 `docker compose up -d postgres redis` 起这两个)
 
 ### 初始化
@@ -92,6 +131,95 @@ ADMIN_SESSION_SECRET=dev_secret_change_me_at_least_32_bytes_long \
 首个管理员账号由 seed 用 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 创建。登录后台后可创建**注册令牌**发给客户端。
 
 > **注意:**生产环境 seed **不创建任何 admin**(零默认,防弱口令)。首个管理员手动创建:`pnpm --filter @auth-proxy/db create-admin` 或 `docker compose exec server node packages/db/dist/scripts/create-admin.js`。
+
+## API 端点
+
+所有端点由中间层(`apps/server`)提供,根路径为 server 基址(如 `http://localhost:3000`)。
+
+### OAuth 2.0 设备授权流程(RFC 8628)
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/register` | 动态客户端注册(返回 `client_id` + `client_secret`) |
+| `POST` | `/device_authorization` | 申请设备码 → 返回 `device_code`、`user_code`、`verification_uri` |
+| `POST` | `/token` | 轮询换 token(`grant_type=urn:ietf:params:oauth:grant-type:device_code`)或刷新(`grant_type=refresh_token`) |
+| `GET` | `/verify` | 用户在浏览器打开的登录页(接受 `?user_code=`) |
+| `POST` | `/verify/login` | 提交公司账号密码,授权该设备 |
+| `GET` | `/user_info` | 查询当前 session 信息(Bearer access token) |
+| `POST` | `/revoke` | 吊销 session/token |
+| `GET` | `/.well-known/jwks.json` | JWT 公钥(RS256) |
+
+### 代理网关
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `ALL` | `/proxy/*` | 用存储的 company token 把任意请求转发到公司应用。去掉 `/proxy` 前缀;透传状态码 + body。 |
+
+### Admin API(`/admin/web/*`)
+
+session cookie 鉴权,供后台页面调用。包含 `/login`、`/logout`、`/me`、`/overview`、`/tokens`、`/apps`、`/audit/login`、`/audit/api`、`/admins`。详见 [`apps/server/src/routes/adminWeb.ts`](./apps/server/src/routes/adminWeb.ts)。
+
+## 端到端流程
+
+CLI/agent 如何完成认证并调用公司 API:
+
+```
+┌─────────┐                    ┌─────────┐                  ┌─────────────┐
+│  客户端 │                    │ server  │                  │  公司应用   │
+│ (CLI)   │                    │ (中间层)│                  │(mock/真实) │
+└────┬────┘                    └────┬────┘                  └──────┬──────┘
+     │  ① POST /register            │                              │
+     │ ────────────────────────────►│                              │
+     │  ◄── client_id, client_secret│                              │
+     │                              │                              │
+     │  ② POST /device_authorization│                              │
+     │ ────────────────────────────►│                              │
+     │  ◄── device_code, user_code, │                              │
+     │      verification_uri        │                              │
+     │                              │                              │
+     │  ③ 浏览器打开 verification_uri│                              │
+     │     登录 ────────────────────┼─────────────────────────────►│(账号密码)
+     │                              │  ◄── company_token (ct_*) ───┤  永不离开中间层
+     │                              │                              │
+     │  ④ POST /token(轮询)        │                              │
+     │ ────────────────────────────►│                              │
+     │  ◄── access_token (JWT)      │                              │
+     │      refresh_token           │                              │
+     │                              │                              │
+     │  ⑤ POST /proxy/api/orders    │                              │
+     │      Authorization: Bearer … │                              │
+     │ ────────────────────────────►│── company_token ────────────►│
+     │                              │◄──────── 响应 ───────────────┤
+     │  ◄── 200 + body(透传)       │                              │
+```
+
+最小客户端示例(HTTP),用 `/register` 拿到 `client_id` / `client_secret` 后:
+
+```bash
+# ① 申请设备码
+curl -X POST http://localhost:3000/device_authorization \
+  -u "$CLIENT_ID:$CLIENT_SECRET"
+
+# → { "device_code":"…", "user_code":"ABCD-WXYZ",
+#     "verification_uri":"http://localhost:3000/verify",
+#     "verification_uri_complete":"http://localhost:3000/verify?user_code=ABCD-WXYZ",
+#     "expires_in":600, "interval":5 }
+
+# ② 用户在浏览器打开 verification_uri_complete 完成登录
+
+# ③ 轮询换 token(遵守 `interval`,处理 authorization_pending / slow_down)
+curl -X POST http://localhost:3000/token \
+  -u "$CLIENT_ID:$CLIENT_SECRET" \
+  -d "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
+  -d "device_code=$DEVICE_CODE"
+
+# → { "access_token":"eyJ…", "token_type":"Bearer",
+#     "expires_in":3600, "refresh_token":"…", "scope":"…" }
+
+# ④ 经代理调用公司 API
+curl http://localhost:3000/proxy/api/orders \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
 
 ## Admin 后台
 
@@ -171,8 +299,9 @@ ALERT_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxx
 - **限流** — login/verify 按 IP,`/token` 按 client,`/proxy` 按 session。
 - **生产配置校验** — `assertProductionConfig()` 启动时拒绝弱 `ADMIN_SESSION_SECRET`。
 - **首个管理员强制随机密码** — seed 不回退弱默认,由 `deploy.sh` 生成强随机值。
+- **Host header 注入防护** — `verification_uri` 用可信的 `PUBLIC_BASE_URL` 拼接,绝不信任 `x-forwarded-host`。
 
-详见 [docs/docker/04-config-secrets](./docs/docker/04-config-secrets.md)。
+详见 [docs/docker/04-config-secrets](./docs/docker/04-config-secrets.md)。发现安全漏洞?见 [SECURITY.zh-CN.md](./SECURITY.zh-CN.md)。
 
 ## 开发
 
@@ -182,6 +311,12 @@ pnpm dev:all      # 起 mock + server(本地开发)
 pnpm typecheck    # 全量类型检查
 pnpm lint         # oxlint
 pnpm build        # 全量构建
+```
+
+测试在 `apps/server/test`(Vitest):
+
+```bash
+pnpm --filter @auth-proxy/server test
 ```
 
 测试账号(mock):
@@ -198,6 +333,12 @@ pnpm build        # 全量构建
 1. `COMPANY_API_BASE` 指向真实公司应用。
 2. 若登录/刷新接口契约与 mock 不同,改 [`apps/server/src/companyAuth.ts`](./apps/server/src/companyAuth.ts)(中间层唯一接触公司应用的文件),做字段映射。
 
+## 贡献
+
+欢迎贡献!请阅读 [CONTRIBUTING.zh-CN.md](./CONTRIBUTING.zh-CN.md) 了解开发配置、代码规范和 PR 流程。参与即代表同意遵守[行为准则](./CODE_OF_CONDUCT.md)。
+
+版本历史见 [CHANGELOG.md](./CHANGELOG.md)。
+
 ## License
 
-[MIT](./LICENSE)
+[MIT](./LICENSE) © 2026 renxqoo

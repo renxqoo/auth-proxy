@@ -1,5 +1,12 @@
 # auth-proxy
 
+[![Build & Push Images](https://github.com/renxqoo/auth-proxy/actions/workflows/build.yml/badge.svg)](https://github.com/renxqoo/auth-proxy/actions/workflows/build.yml)
+[![Deploy](https://github.com/renxqoo/auth-proxy/actions/workflows/deploy.yml/badge.svg)](https://github.com/renxqoo/auth-proxy/actions/workflows/deploy.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D22-green.svg)](https://nodejs.org)
+[![pnpm](https://img.shields.io/badge/pnpm-11-red.svg)](https://pnpm.io)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./CONTRIBUTING.md)
+
 **English** · [中文](./README.zh-CN.md)
 
 OAuth 2.0 device-flow authentication proxy. Issues RS256 JWTs and proxies requests to your company's apps — **company credentials never leave the proxy**. Clients only ever hold a JWT minted by the middle layer; the company token (`ct_*`) stays internal.
@@ -23,15 +30,47 @@ Two links: **① login** (device flow → client gets a JWT) and **② proxy** (
 
 ## Table of Contents
 
+- [Features](#features)
+- [Tech Stack](#tech-stack)
 - [Architecture](#architecture)
 - [Quick Start](#quick-start)
+- [API Endpoints](#api-endpoints)
+- [End-to-End Flow](#end-to-end-flow)
 - [Admin Console](#admin-console)
 - [Deployment](#deployment)
 - [Operations](#operations)
 - [Security Design](#security-design)
 - [Development](#development)
 - [Connecting the Real Company App](#connecting-the-real-company-app)
+- [Contributing](#contributing)
 - [License](#license)
+
+## Features
+
+- 🔐 **Device-flow auth (RFC 8628)** — ideal for CLIs and headless agents; no browser redirect needed on the client.
+- 🛡️ **Company credentials never exposed** — the company token (`ct_*`) lives only inside the proxy; clients get a proxy-minted JWT.
+- 🔑 **JWT RS256 with rotatable signing keys** — public key published at `/.well-known/jwks.json`; keys stored in the `signing_keys` table.
+- 🔄 **Refresh-token rotation + reuse detection** — replaying an old refresh token past the grace window auto-revokes the session.
+- 🧮 **Rate limiting** (Redis-backed) — per-IP on login, per-client on `/token`, per-session on `/proxy`.
+- 🛡️ **CSRF protection**, scrypt-hashed secrets, production config validation, strong-random first admin.
+- 📊 **Audit log** — login attempts (incl. `[REUSE]` replay events) and every proxied API call.
+- 🖥️ **Admin console** (Next.js) — manage registration tokens, clients, admins, and view audit logs.
+- 🐳 **One-command deploy** — `deploy.sh` or GitHub Actions CI/CD with GHCR image distribution.
+- 🗄️ **Automated ops** — daily Postgres backups + health-check cron installed on deploy.
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|------------|
+| Middle layer (`apps/server`) | [Hono](https://hono.dev) 4, [jose](https://github.com/panva/jose) 6 (JWT/JWKS), TypeScript 5 |
+| Admin console (`apps/admin-web`) | [Next.js](https://nextjs.org) 16, React 19, Tailwind CSS 4, shadcn/ui |
+| Shared contracts (`packages/shared`) | [zod](https://zod.dev) 4 |
+| Database (`packages/db`) | PostgreSQL, [drizzle-orm](https://orm.drizzle.team) 0.44, drizzle migrations |
+| Cache / rate-limit / device-code store | Redis |
+| Monorepo | pnpm 11 workspaces + [Turborepo](https://turbo.build) 2 |
+| Lint / Format | oxlint + oxfmt |
+| Test | Vitest |
+| Deployment | Docker, docker-compose, nginx, GitHub Actions |
 
 ## Architecture
 
@@ -63,7 +102,7 @@ Full deployment diagrams and rationale: [docs/docker](./docs/docker/README.md).
 
 ### Prerequisites
 
-- **Node 22+**, **pnpm** (auto-enabled via corepack)
+- **Node 22+**, **pnpm 11** (auto-enabled via corepack)
 - **Postgres** and **Redis** (installed locally, or boot them with `docker compose up -d postgres redis`)
 
 ### Initialize
@@ -92,6 +131,95 @@ ADMIN_SESSION_SECRET=dev_secret_change_me_at_least_32_bytes_long \
 The first admin account is created by the seed using `ADMIN_USERNAME` / `ADMIN_PASSWORD`. After logging into the console you can mint **registration tokens** to hand out to clients.
 
 > **Note:** in production the seed creates **no** admin (zero defaults, no weak passwords). Create the first admin manually with `pnpm --filter @auth-proxy/db create-admin` or `docker compose exec server node packages/db/dist/scripts/create-admin.js`.
+
+## API Endpoints
+
+All endpoints are served by the middle layer (`apps/server`), rooted at the server base URL (e.g. `http://localhost:3000`).
+
+### OAuth 2.0 device flow (RFC 8628)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/register` | Dynamic client registration (returns `client_id` + `client_secret`) |
+| `POST` | `/device_authorization` | Request a device code → returns `device_code`, `user_code`, `verification_uri` |
+| `POST` | `/token` | Poll for token (`grant_type=urn:ietf:params:oauth:grant-type:device_code`) or refresh (`grant_type=refresh_token`) |
+| `GET` | `/verify` | Login page the user opens in a browser (accepts `?user_code=`) |
+| `POST` | `/verify/login` | Submit company username/password to authorize the device |
+| `GET` | `/user_info` | Get current session info (bearer access token) |
+| `POST` | `/revoke` | Revoke a session/token |
+| `GET` | `/.well-known/jwks.json` | Public JWT signing keys (RS256) |
+
+### Proxy gateway
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `ALL` | `/proxy/*` | Forward any request to the company app using the stored company token. Strip `/proxy` prefix; pass through status + body. |
+
+### Admin API (`/admin/web/*`)
+
+Session-cookie auth, consumed by the admin console. Includes `/login`, `/logout`, `/me`, `/overview`, `/tokens`, `/apps`, `/audit/login`, `/audit/api`, `/admins`. See [`apps/server/src/routes/adminWeb.ts`](./apps/server/src/routes/adminWeb.ts).
+
+## End-to-End Flow
+
+How a CLI/agent authenticates and calls a company API:
+
+```
+┌─────────┐                    ┌─────────┐                  ┌─────────────┐
+│  Client │                    │ server  │                  │ Company app │
+│ (CLI)   │                    │ (proxy) │                  │ (mock/real) │
+└────┬────┘                    └────┬────┘                  └──────┬──────┘
+     │  ① POST /register            │                              │
+     │ ────────────────────────────►│                              │
+     │  ◄── client_id, client_secret│                              │
+     │                              │                              │
+     │  ② POST /device_authorization│                              │
+     │ ────────────────────────────►│                              │
+     │  ◄── device_code, user_code, │                              │
+     │      verification_uri        │                              │
+     │                              │                              │
+     │  ③ Open verification_uri     │                              │
+     │     in browser, login ───────┼─────────────────────────────►│ (username/pass)
+     │                              │  ◄── company_token (ct_*) ───┤  never leaves proxy
+     │                              │                              │
+     │  ④ POST /token (poll)        │                              │
+     │ ────────────────────────────►│                              │
+     │  ◄── access_token (JWT)      │                              │
+     │      refresh_token           │                              │
+     │                              │                              │
+     │  ⑤ POST /proxy/api/orders    │                              │
+     │      Authorization: Bearer … │                              │
+     │ ────────────────────────────►│── company_token ────────────►│
+     │                              │◄──────── response ───────────┤
+     │  ◄── 200 + body (passthrough)│                              │
+```
+
+Minimal client example (HTTP), once you have `client_id` / `client_secret` from `/register`:
+
+```bash
+# ① request device code
+curl -X POST http://localhost:3000/device_authorization \
+  -u "$CLIENT_ID:$CLIENT_SECRET"
+
+# → { "device_code":"…", "user_code":"ABCD-WXYZ",
+#     "verification_uri":"http://localhost:3000/verify",
+#     "verification_uri_complete":"http://localhost:3000/verify?user_code=ABCD-WXYZ",
+#     "expires_in":600, "interval":5 }
+
+# ② user opens verification_uri_complete in a browser and logs in
+
+# ③ poll for token (respect `interval`, handle authorization_pending / slow_down)
+curl -X POST http://localhost:3000/token \
+  -u "$CLIENT_ID:$CLIENT_SECRET" \
+  -d "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
+  -d "device_code=$DEVICE_CODE"
+
+# → { "access_token":"eyJ…", "token_type":"Bearer",
+#     "expires_in":3600, "refresh_token":"…", "scope":"…" }
+
+# ④ call the company API through the proxy
+curl http://localhost:3000/proxy/api/orders \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
 
 ## Admin Console
 
@@ -171,8 +299,9 @@ Full ops guide (backup/restore, alerting, logs, migrations, troubleshooting): [d
 - **Rate limiting** — login/verify by IP, `/token` by client, `/proxy` by session.
 - **Production config validation** — `assertProductionConfig()` rejects a weak `ADMIN_SESSION_SECRET` at startup.
 - **First admin uses a strong random password** — seed never falls back to a weak default; `deploy.sh` generates a strong random value.
+- **Host-header injection guard** — `verification_uri` is built from the trusted `PUBLIC_BASE_URL`, never from `x-forwarded-host`.
 
-Details: [docs/docker/04-config-secrets](./docs/docker/04-config-secrets.md).
+Details: [docs/docker/04-config-secrets](./docs/docker/04-config-secrets.md). Found a vulnerability? See [SECURITY.md](./SECURITY.md).
 
 ## Development
 
@@ -182,6 +311,12 @@ pnpm dev:all      # start mock + server (local dev)
 pnpm typecheck    # typecheck all packages
 pnpm lint         # oxlint
 pnpm build        # build all packages
+```
+
+Tests live in `apps/server/test` (Vitest):
+
+```bash
+pnpm --filter @auth-proxy/server test
 ```
 
 Test accounts (mock):
@@ -198,6 +333,12 @@ When the real company app is available, **only touch the middle layer**:
 1. Point `COMPANY_API_BASE` at the real company app.
 2. If the login/refresh contract differs from the mock, edit [`apps/server/src/companyAuth.ts`](./apps/server/src/companyAuth.ts) — the only file in the middle layer that talks to the company app — and map the fields.
 
+## Contributing
+
+Contributions are welcome! Please read [CONTRIBUTING.md](./CONTRIBUTING.md) for the dev setup, code style, and PR process. By participating you agree to abide by the [Code of Conduct](./CODE_OF_CONDUCT.md).
+
+See [CHANGELOG.md](./CHANGELOG.md) for release history.
+
 ## License
 
-[MIT](./LICENSE)
+[MIT](./LICENSE) © 2026 renxqoo
