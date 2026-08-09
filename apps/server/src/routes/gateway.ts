@@ -136,12 +136,14 @@ gateway.all("/*", async (c) => {
   upstreamHeaders.set("Authorization", `Bearer ${companyAccessToken}`);
 
   const startedAt = Date.now();
+  // body 透传:用 arrayBuffer 保留二进制(text() 会破坏非 UTF-8 数据)
+  const bodyData = ["GET", "HEAD"].includes(c.req.method)
+    ? undefined
+    : await c.req.arrayBuffer();
   const upstreamRes = await fetch(target, {
     method: c.req.method,
     headers: upstreamHeaders,
-    body: ["GET", "HEAD"].includes(c.req.method)
-      ? undefined
-      : await c.req.text(),
+    body: bodyData,
   });
   const durationMs = Date.now() - startedAt;
 
