@@ -47,7 +47,7 @@ vi.mock("../src/jwt.js", () => ({
   bearerOf: (h?: string) => h?.replace(/^Bearer\s+/, ""),
   verifyAccessToken: vi.fn(async (t?: string) =>
     t === "valid.jwt.token"
-      ? { sub: "sid_1", scope: jwtRef.scope, aud: "auth-proxy", typ: "access" as const }
+      ? { sub: "sid_1", scope: jwtRef.scope, aud: "auth-proxy", client_id: "cli_1", typ: "access" as const }
       : null,
   ),
 }));
@@ -177,5 +177,46 @@ describe("gateway 通配符 + method 匹配", () => {
       headers: { Authorization: "Bearer valid.jwt.token" },
     });
     expect(res.status).toBe(200);
+  });
+});
+
+describe("RFC 6750 §3: WWW-Authenticate 响应头", () => {
+  it("缺 token → 401 + WWW-Authenticate: Bearer realm=...", async () => {
+    policiesRef.policies = [
+      { id: 1, pattern: "/api/orders*", scope: "orders:read", method: "GET", description: null, createdAt: new Date() },
+    ];
+    const res = await gateway.request("http://localhost/proxy/api/orders", {
+      method: "GET",
+      // 无 Authorization 头
+    });
+    expect(res.status).toBe(401);
+    const wwwAuth = res.headers.get("www-authenticate");
+    expect(wwwAuth).toBeTruthy();
+    expect(wwwAuth).toMatch(/^Bearer\s/);
+    expect(wwwAuth).toContain('realm="');
+  });
+
+  it("无效 token → 401 + WWW-Authenticate", async () => {
+    policiesRef.policies = [
+      { id: 1, pattern: "/api/orders*", scope: "orders:read", method: "GET", description: null, createdAt: new Date() },
+    ];
+    const res = await gateway.request("http://localhost/proxy/api/orders", {
+      method: "GET",
+      headers: { Authorization: "Bearer invalid.token" },
+    });
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toMatch(/^Bearer\s/);
+  });
+
+  it("insufficient_scope → 403 + WWW-Authenticate 带 error=insufficient_scope", async () => {
+    policiesRef.policies = [
+      { id: 1, pattern: "/api/orders*", scope: "orders:read", method: "GET", description: null, createdAt: new Date() },
+    ];
+    jwtRef.scope = "offline_access"; // 没 orders:read
+    const res = await proxyGet("/api/orders");
+    expect(res.status).toBe(403);
+    const wwwAuth = res.headers.get("www-authenticate");
+    expect(wwwAuth).toBeTruthy();
+    expect(wwwAuth).toContain('error="insufficient_scope"');
   });
 });

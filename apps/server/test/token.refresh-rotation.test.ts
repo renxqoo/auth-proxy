@@ -92,7 +92,7 @@ const jwtRef = vi.hoisted(() => ({
 vi.mock("../src/jwt.js", () => ({
   verifyAccessToken: vi.fn(async () => null),
   verifyRefreshToken: jwtRef.verifyRefresh,
-  signAccessToken: vi.fn(async (_sid: string, scope: string) =>
+  signAccessToken: vi.fn(async (_sid: string, scope: string, _cid: string) =>
     `access.${scope}`),
   signRefreshToken: vi.fn(async (_sid: string, rid: string) =>
     `refresh.${rid}`),

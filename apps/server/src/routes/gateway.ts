@@ -29,11 +29,20 @@ gateway.all("/*", async (c) => {
     bearerOf(c.req.header("Authorization")),
   );
   if (!claims) {
-    return oauthError(c, "invalid_grant", "missing or invalid access token");
+    // RFC 6750 §3:受保护资源缺/无效 token → 401 + WWW-Authenticate
+    return c.json(
+      { error: "invalid_token", error_description: "missing or invalid access token" },
+      401,
+      { "WWW-Authenticate": 'Bearer realm="auth-proxy", error="invalid_token"' },
+    );
   }
   const session = await findSessionBySessionId(claims.sub);
   if (!session) {
-    return oauthError(c, "invalid_grant", "session not found; please re-login");
+    return c.json(
+      { error: "invalid_token", error_description: "session not found; please re-login" },
+      401,
+      { "WWW-Authenticate": 'Bearer realm="auth-proxy", error="invalid_token"' },
+    );
   }
 
   // 按 session 限流(防滥用 gateway)
@@ -90,12 +99,16 @@ gateway.all("/*", async (c) => {
   if (matched.scope) {
     const tokenScopes = new Set((claims.scope ?? "").split(/\s+/).filter(Boolean));
     if (!tokenScopes.has(matched.scope)) {
+      // RFC 6750 §3:scope 不足 → 403 + WWW-Authenticate 带 error=insufficient_scope
       return c.json(
         {
           error: "insufficient_scope",
           error_description: `requires scope: ${matched.scope}`,
         },
         403,
+        {
+          "WWW-Authenticate": `Bearer realm="auth-proxy", error="insufficient_scope", error_description="requires scope: ${matched.scope}"`,
+        },
       );
     }
   }

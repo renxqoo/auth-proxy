@@ -179,6 +179,7 @@ async function handleDeviceCodeGrant(
           session.sessionId,
           session.refreshId,
           grantedScope,
+          session.data.clientId,
         ),
       );
     }
@@ -227,6 +228,7 @@ async function handleRefreshGrant(
         updated.sessionId,
         updated.refreshId,
         updated.scope,
+        updated.clientId,
       ),
     );
   }
@@ -266,6 +268,7 @@ async function handleGraceOrReuse(
         session.sessionId,
         session.refreshId,
         session.scope,
+        session.clientId,
       ),
     );
   }
@@ -290,9 +293,10 @@ async function issueTokenResponse(
   sessionId: string,
   refreshId: string,
   scope: string,
+  clientId: string,
 ): Promise<TokenResponse> {
   const [accessToken, newRefreshToken] = await Promise.all([
-    signAccessToken(sessionId, scope),
+    signAccessToken(sessionId, scope, clientId),
     signRefreshToken(sessionId, refreshId),
   ]);
   return {
