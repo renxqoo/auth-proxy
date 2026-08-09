@@ -201,6 +201,40 @@ export function ordersByUser(userId: string): OrderSummary[] {
   return ORDER_SUMMARIES.filter((o) => o.userId === userId);
 }
 
+/** 分页结果:items 为本页数据,hasMore/nextCursor 供客户端续拉 */
+export interface Paginated<T> {
+  items: T[];
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+/**
+ * 按 cursor 游标分页。cursor 编码为"上一页最后一条的 id",首次传 undefined。
+ * 游标语义:返回 id 严格大于 cursor 的记录(按 ORDER_SUMMARIES 原始顺序定位)。
+ */
+export function ordersByUserPaged(
+  userId: string,
+  opts: { limit?: number; cursor?: string } = {},
+): Paginated<OrderSummary> {
+  const all = ordersByUser(userId);
+  const limit = opts.limit && opts.limit > 0 ? Math.min(opts.limit, 100) : 20;
+
+  let startIdx = 0;
+  if (opts.cursor) {
+    // cursor 是上一页最后一条 id,从它之后开始
+    const idx = all.findIndex((o) => o.id === opts.cursor);
+    startIdx = idx >= 0 ? idx + 1 : 0;
+  }
+
+  const slice = all.slice(startIdx, startIdx + limit);
+  const hasMore = startIdx + limit < all.length;
+  return {
+    items: slice,
+    hasMore,
+    nextCursor: hasMore && slice.length > 0 ? slice[slice.length - 1].id : null,
+  };
+}
+
 export function orderDetail(userId: string, orderId: string): OrderDetail | null {
   const d = ORDER_DETAILS.find((o) => o.id === orderId);
   // 跨用户访问订单 → 视为不存在(404),不暴露"该订单属于别人"

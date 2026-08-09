@@ -9,7 +9,7 @@ import {
   getRoutePolicyRepo,
 } from "../repos/index.js";
 import { revokeSessionsByClient, createSession } from "../sessionStore.js";
-import { loginAsCompany } from "../companyAuth.js";
+import { loginAsCompany, CompanyAuthError } from "../companyAuth.js";
 import { signAccessToken, signRefreshToken } from "../jwt.js";
 import { safeError } from "../config.js";
 import {
@@ -377,9 +377,20 @@ adminWeb.post("/issue-token", async (c) => {
     companyToken = await loginAsCompany(username);
   } catch (e) {
     safeError("[admin] issue-token: loginAsCompany failed:", e);
+    // CompanyAuthError → 保留真实状态码;其它 → 500
+    if (e instanceof CompanyAuthError) {
+      const httpStatus = (e.status >= 400 && e.status < 500 ? e.status : 502) as 400 | 401 | 403 | 404 | 502;
+      return c.json(
+        {
+          error: "invalid_request",
+          error_description: `company app error: ${e.code} — ${e.message}`,
+        },
+        httpStatus,
+      );
+    }
     return c.json(
-      { error: "invalid_request", error_description: `cannot issue token for '${username}'` },
-      400,
+      { error: "server_error", error_description: `cannot reach company app for '${username}'` },
+      502,
     );
   }
 
@@ -424,11 +435,11 @@ adminWeb.post("/issue-token", async (c) => {
   const finalScope = requestedScopes.join(" ");
 
   // 3. 创建 session(标记为 agent 类型)
-  const session = await createSession(companyToken, finalScope, `admin-issued`);
+  const session = await createSession(companyToken, finalScope, `admin-issued`, "agent");
 
   // 4. 签发 JWT + refresh token
   const [accessToken, refreshToken] = await Promise.all([
-    signAccessToken(session.sessionId, finalScope, `admin-issued`),
+    signAccessToken(session.sessionId, finalScope, `admin-issued`, ttl),
     signRefreshToken(session.sessionId, session.refreshId),
   ]);
 

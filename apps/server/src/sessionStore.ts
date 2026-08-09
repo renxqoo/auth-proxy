@@ -23,6 +23,7 @@ export async function createSession(
   companyToken: CompanyTokenResponse,
   scope: string,
   clientId: string,
+  sessionType?: string,
 ): Promise<CreatedSession> {
   const repo = getSessionRepo();
   const userId = await repo.upsertUser(companyToken.user);
@@ -37,6 +38,7 @@ export async function createSession(
     companyToken,
     companyTokenExpiresAt: Date.now() + companyToken.expires_in * 1000,
     scope,
+    sessionType,
   });
   return { sessionId, refreshId, data };
 }

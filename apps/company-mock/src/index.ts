@@ -10,7 +10,7 @@ import { getTokenStore, type TokenRecord } from "./tokenStore.js";
 import {
   invoicesByUser,
   orderDetail,
-  ordersByUser,
+  ordersByUserPaged,
   productById,
   PRODUCTS,
 } from "./data.js";
@@ -164,14 +164,27 @@ app.get("/api/profile", (c) => {
   return c.json({ id: rec.user.id, ...profile }, 200);
 });
 
-// ---------- GET /api/orders (订单列表) ----------
+// ---------- GET /api/orders (订单列表,支持分页) ----------
 app.get("/api/orders", (c) => {
   const [rec, err] = requireAuth(c);
   if (err) return err;
   const denied = requireScope(c, rec, "orders:read");
   if (denied) return denied;
   // 数据可见性:只返回当前用户的订单(跨用户隔离)
-  return c.json({ orders: ordersByUser(rec.user.id) }, 200);
+  const limit = Number(c.req.query("limit"));
+  const cursor = c.req.query("cursor");
+  const page = ordersByUserPaged(rec.user.id, {
+    limit: Number.isFinite(limit) ? limit : undefined,
+    cursor: cursor || undefined,
+  });
+  return c.json(
+    {
+      orders: page.items,
+      hasMore: page.hasMore,
+      nextCursor: page.nextCursor,
+    },
+    200,
+  );
 });
 
 // ---------- GET /api/orders/:id (订单详情) ----------

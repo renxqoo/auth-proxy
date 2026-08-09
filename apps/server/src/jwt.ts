@@ -63,6 +63,7 @@ export async function signAccessToken(
   sessionId: string,
   scope: string,
   clientId: string,
+  ttlSec?: number,
 ): Promise<string> {
   const key = await getSigningKeyRepo().getActive();
   const privateKey = await importPKCS8(key.privatePem, "RS256");
@@ -72,7 +73,7 @@ export async function signAccessToken(
     .setAudience(config.jwtAudience)
     .setSubject(sessionId)
     .setIssuedAt()
-    .setExpirationTime(`${config.jwtAccessTtlSec}s`)
+    .setExpirationTime(`${ttlSec ?? config.jwtAccessTtlSec}s`)
     .sign(privateKey);
 }
 
