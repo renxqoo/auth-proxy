@@ -2,7 +2,7 @@ import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { eq } from "drizzle-orm";
-import { signingKeys } from "./schema.js";
+import { signingKeys, scopes, routePolicies, users } from "./schema.js";
 
 /**
  * 种子数据:仅 RS256 密钥对(若无 active 则生成一对)。
@@ -56,6 +56,55 @@ async function main() {
   } else {
     console.log("[db] active signing key exists, skip");
   }
+
+  // 种子默认 scope 定义(对齐 company-mock 词汇表 + 中间层系统 scope)
+  // onConflictDoNothing:重复 seed 不报错、不覆盖(已存在的保留)
+  const defaultScopes = [
+    { name: "offline_access", description: "中间层签发 refresh_token 所需", isSystem: true },
+    { name: "company.api", description: "经 proxy 访问公司应用的聚合 scope", isSystem: true },
+    { name: "orders:read", description: "读订单列表/详情", isSystem: false },
+    { name: "orders:write", description: "下单/取消", isSystem: false },
+    { name: "products:read", description: "读商品目录", isSystem: false },
+    { name: "invoices:read", description: "读发票", isSystem: false },
+    { name: "admin", description: "管理后台(用户列表等)", isSystem: false },
+  ];
+  for (const s of defaultScopes) {
+    await db.insert(scopes).values(s).onConflictDoNothing();
+  }
+  console.log(`[db] ensured ${defaultScopes.length} default scopes`);
+
+  // 预置 system 用户(client_credentials 的机器 session 用,无真实公司用户)
+  await db
+    .insert(users)
+    .values({
+      companyUserId: "__system_client_credentials__",
+      name: "System (client_credentials)",
+      scopes: [],
+    })
+    .onConflictDoNothing();
+  console.log("[db] ensured system user for client_credentials");
+
+  // 种子默认路由策略(gateway 默认拒绝,故必须配齐 company-mock 现有接口)
+  // pattern 是去掉 /proxy 前缀后的上游路径;scope=null 表示只需有效登录。
+  // 用 pattern 做幂等键(重复 seed 不报错):先查再插
+  const defaultPolicies = [
+    { pattern: "/api/orders*", scope: "orders:read", method: "GET", description: "读订单列表/详情" },
+    { pattern: "/api/products*", scope: "products:read", method: "GET", description: "读商品目录" },
+    { pattern: "/api/invoices*", scope: "invoices:read", method: "GET", description: "读发票" },
+    { pattern: "/api/admin/users", scope: "admin", method: "GET", description: "用户列表(管理员)" },
+    { pattern: "/me", scope: null, method: "GET", description: "当前用户信息(只需登录)" },
+    { pattern: "/api/profile", scope: null, method: "GET", description: "个人资料(只需登录)" },
+  ];
+  for (const p of defaultPolicies) {
+    const exists = await db
+      .select({ id: routePolicies.id })
+      .from(routePolicies)
+      .where(eq(routePolicies.pattern, p.pattern));
+    if (exists.length === 0) {
+      await db.insert(routePolicies).values(p);
+    }
+  }
+  console.log(`[db] ensured ${defaultPolicies.length} default route policies`);
 
   await conn.end();
   console.log("[db] seed done ✓ (admin 账号需手动创建,见文件头注释)");

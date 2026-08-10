@@ -100,12 +100,42 @@ export const config = {
   redisUrl: required("REDIS_URL", "redis://localhost:6379/2"),
   // JWT 签发者(RS256;密钥从 signing_keys 表取,见 Phase C)
   jwtIssuer: required("JWT_ISSUER", "auth-proxy"),
+  /**
+   * access token 的 audience(RFC 9068 §3 要求 JWT access token 必须有 aud)。
+   * 标识资源服务器(gateway /proxy 本身或下游公司应用)。校验时必须匹配,
+   * 防止为 A 签发的 token 被拿到 B 使用(token confusion)。
+   * 单一固定值适配当前单公司应用架构。
+   */
+  jwtAudience: required("JWT_AUDIENCE", "auth-proxy"),
   // token 生命周期(秒)
   jwtAccessTtlSec: num("JWT_ACCESS_TTL", 3600), // 1h
   jwtRefreshTtlSec: num("JWT_REFRESH_TTL", 86400 * 7), // 7d
+  /**
+   * 允许的 scope 白名单(空格分隔)。device_authorization 入口校验:
+   * 请求的 scope 超出此集合 → invalid_scope(RFC 6749 §3.3)。
+   * 注:offline_access 由入口自动补上,无需客户端显式请求,但列在白名单内可兼容。
+   * company.api 是中间层聚合 scope(代表"公司应用 API 访问权",非单一公司权限),
+   * 客户端(crmb)会请求它,故列入默认白名单。
+   */
+  allowedScopes: required(
+    "ALLOWED_SCOPES",
+    "company.api orders:read orders:write products:read invoices:read admin offline_access",
+  ),
+  /**
+   * 系统 scope 集合(空格分隔)。这些 scope 是中间层自身管理的,不属于公司应用
+   * 返回的用户权限(user.scopes),故在 narrowScope 收窄时不参与用户权限比对:
+   *   - offline_access:中间层签发 refresh_token 所需
+   *   - company.api:中间层聚合 scope(代表可经 proxy 访问公司应用)
+   * 其余 scope 必须是用户实际拥有的,否则 invalid_scope。
+   */
+  systemScopes: required("SYSTEM_SCOPES", "offline_access company.api"),
   // device flow
   deviceCodeTtlSec: num("DEVICE_CODE_TTL", 600), // 10min
   devicePollIntervalSec: num("DEVICE_POLL_INTERVAL", 5),
+  // authorization_code 流程(RFC 6749 §4.1 + PKCE RFC 7636)
+  authCodeTtlSec: num("AUTH_CODE_TTL", 120), // 授权码有效期(秒);OAuth BCP 建议短
+  // admin 签发 agent token 的最大 TTL(秒)。防永久 token。
+  agentTokenMaxTtlSec: num("AGENT_TOKEN_MAX_TTL", 86400), // 24h
   // refresh 重用检测:旧 refresh 在此窗口内复用视为合法(容忍并发/重试),
   // 超过窗口视为泄露 → 吊销 session。OAuth 安全 BCP 建议 30s-数分钟。
   refreshReuseGraceSec: num("REFRESH_REUSE_GRACE_SEC", 30),

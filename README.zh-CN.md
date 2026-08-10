@@ -140,14 +140,16 @@ ADMIN_SESSION_SECRET=dev_secret_change_me_at_least_32_bytes_long \
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `POST` | `/register` | 动态客户端注册(返回 `client_id` + `client_secret`) |
+| `POST` | `/register` | RFC 7591 动态客户端注册(`client_metadata` → `client_id` + `client_secret`) |
+| `GET` | `/authorize` | RFC 6749 §4.1.1 授权端点(authorization_code + PKCE S256) |
 | `POST` | `/device_authorization` | 申请设备码 → 返回 `device_code`、`user_code`、`verification_uri` |
-| `POST` | `/token` | 轮询换 token(`grant_type=urn:ietf:params:oauth:grant-type:device_code`)或刷新(`grant_type=refresh_token`) |
+| `POST` | `/token` | 签发 token:`authorization_code`(PKCE)、`device_code` 或 `refresh_token` grant |
 | `GET` | `/verify` | 用户在浏览器打开的登录页(接受 `?user_code=`) |
 | `POST` | `/verify/login` | 提交公司账号密码,授权该设备 |
 | `GET` | `/user_info` | 查询当前 session 信息(Bearer access token) |
 | `POST` | `/revoke` | 吊销 session/token |
 | `GET` | `/.well-known/jwks.json` | JWT 公钥(RS256) |
+| `GET` | `/.well-known/oauth-authorization-server` | RFC 8414 metadata(issuer、端点、grant、PKCE method、scope) |
 
 ### 代理网关
 
@@ -293,9 +295,16 @@ ALERT_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxx
 
 - **公司 token(`ct_*`)永不离开中间层** — 客户端只持有中间层签发的 JWT。
 - **JWT RS256** — 签名密钥存 `signing_keys` 表,可轮转;公钥经 `/.well-known/jwks.json` 暴露。
+- **access token 含 `aud`**(RFC 9068 §3)— 校验时必须匹配 audience,防 token confusion(跨资源服务器误用)。
 - **`client_secret` scrypt 哈希存储**,非明文。
 - **CSRF 防护** — `/verify/login` 双重提交 cookie。
-- **Refresh 重用检测** — 旧 refresh 超 `REFRESH_REUSE_GRACE_SEC`(30s)再用 → 自动吊销 session。
+- **Refresh token 轮换 + 重用检测** — 每次刷新签发新的 refresh token;旧 refresh 超 `REFRESH_REUSE_GRACE_SEC`(30s)再用 → 自动吊销 session。
+- **Scope 授权边界(四层,OAuth 2.1)** — scope 授权动态存库,可经 admin 后台管理:
+  - **层 1(全局定义):** scope 在 `scopes` 表定义(seed 默认:`orders:read`、`admin` 等);请求的 scope 必须存在 → 否则 `invalid_scope`。
+  - **层 3(client 绑定):** 每个 client(`apps.allowed_scopes`)可限制为 scope 子集;空 = 允许全部(默认)。在 `/device_authorization` 强制。
+  - **层 2(用户收窄):** 签发时请求的 scope 与用户实际权限(`user.scopes`)取交集;越权 → `invalid_scope`。
+  - **层 4(gateway 路径策略):** gateway 转发前按 `route_policies`(路径模式 → 所需 scope)校验 token.scope,不满足 → `403 insufficient_scope`。**默认拒绝**:没配策略的路径直接 403(强制显式配置)。这是纵深防御:即使资源服务忘了查权限,gateway 也挡得住。
+  - 系统 scope(`offline_access`、`company.api`)自动授予,豁免层 2、3。
 - **限流** — login/verify 按 IP,`/token` 按 client,`/proxy` 按 session。
 - **生产配置校验** — `assertProductionConfig()` 启动时拒绝弱 `ADMIN_SESSION_SECRET`。
 - **首个管理员强制随机密码** — seed 不回退弱默认,由 `deploy.sh` 生成强随机值。

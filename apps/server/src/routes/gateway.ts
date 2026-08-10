@@ -5,7 +5,9 @@ import { getRefresher, CompanyAuthError } from "../companyTokenRefresher.js";
 import { bearerOf, verifyAccessToken } from "../jwt.js";
 import { oauthError } from "../oauthHelpers.js";
 import { enforceRateLimit } from "../middleware/rateLimit.js";
-import { getAuditRepo } from "../repos/index.js";
+import { getAuditRepo, getRoutePolicyRepo } from "../repos/index.js";
+import { findMatchingPolicy } from "../repos/routePolicyRepo.js";
+import { hasCompanyToken } from "../repos/sessionRepo.js";
 
 /**
  * /proxy/* —— API Gateway。CLI 拿业务数据走这里。
@@ -28,11 +30,20 @@ gateway.all("/*", async (c) => {
     bearerOf(c.req.header("Authorization")),
   );
   if (!claims) {
-    return oauthError(c, "invalid_grant", "missing or invalid access token");
+    // RFC 6750 §3:受保护资源缺/无效 token → 401 + WWW-Authenticate
+    return c.json(
+      { error: "invalid_token", error_description: "missing or invalid access token" },
+      401,
+      { "WWW-Authenticate": 'Bearer realm="auth-proxy", error="invalid_token"' },
+    );
   }
   const session = await findSessionBySessionId(claims.sub);
   if (!session) {
-    return oauthError(c, "invalid_grant", "session not found; please re-login");
+    return c.json(
+      { error: "invalid_token", error_description: "session not found; please re-login" },
+      401,
+      { "WWW-Authenticate": 'Bearer realm="auth-proxy", error="invalid_token"' },
+    );
   }
 
   // 按 session 限流(防滥用 gateway)
@@ -50,7 +61,19 @@ gateway.all("/*", async (c) => {
   }
 
   // 2. 取(必要时刷新)company access token
+  // 按真实状态判定:无可用 company token 的 session(machine/client_credentials)不能转发。
+  // agent session(admin issue-token,经 createSession 创建)携带真实 company token,可正常代理。
+  // 不依赖 sessionType 字符串 —— 避免"新增类型漏改 guard"的脆弱性。
   let companyAccessToken: string;
+  if (!hasCompanyToken(session)) {
+    return c.json(
+      {
+        error: "invalid_request",
+        error_description: "session without a company token cannot proxy to company app",
+      },
+      403,
+    );
+  }
   try {
     companyAccessToken = await getRefresher().ensureFresh(claims.sub);
   } catch (e) {
@@ -67,8 +90,41 @@ gateway.all("/*", async (c) => {
 
   // 3. 计算转发目标 URL:去掉 /proxy 前缀
   const url = new URL(c.req.url);
-  const upstreamPath = url.pathname.replace(/^\/proxy/, "") + url.search;
+  const upstreamPathNoQuery = url.pathname.replace(/^\/proxy/, "");
+  const upstreamPath = upstreamPathNoQuery + url.search;
   const target = `${config.companyApiBase}${upstreamPath}`;
+
+  // 3.5 路径 scope 策略校验(层 4,企业纵深防御):
+  // 默认拒绝 —— 没匹配到任何策略的路径直接 403,强制所有路径显式配策略。
+  // 匹配到策略但 token.scope 不含所需 scope → 403 insufficient_scope。
+  // 策略 scope=null → 只需有效 token(已验),放行。
+  const policies = await getRoutePolicyRepo().getPolicies();
+  const matched = findMatchingPolicy(policies, upstreamPathNoQuery, c.req.method);
+  if (!matched) {
+    return c.json(
+      {
+        error: "insufficient_scope",
+        error_description: `no route policy configured for ${upstreamPathNoQuery}`,
+      },
+      403,
+    );
+  }
+  if (matched.scope) {
+    const tokenScopes = new Set((claims.scope ?? "").split(/\s+/).filter(Boolean));
+    if (!tokenScopes.has(matched.scope)) {
+      // RFC 6750 §3:scope 不足 → 403 + WWW-Authenticate 带 error=insufficient_scope
+      return c.json(
+        {
+          error: "insufficient_scope",
+          error_description: `requires scope: ${matched.scope}`,
+        },
+        403,
+        {
+          "WWW-Authenticate": `Bearer realm="auth-proxy", error="insufficient_scope", error_description="requires scope: ${matched.scope}"`,
+        },
+      );
+    }
+  }
 
   // 4. 透传请求(方法/headers/body)
   const upstreamHeaders = new Headers();
@@ -81,12 +137,14 @@ gateway.all("/*", async (c) => {
   upstreamHeaders.set("Authorization", `Bearer ${companyAccessToken}`);
 
   const startedAt = Date.now();
+  // body 透传:用 arrayBuffer 保留二进制(text() 会破坏非 UTF-8 数据)
+  const bodyData = ["GET", "HEAD"].includes(c.req.method)
+    ? undefined
+    : await c.req.arrayBuffer();
   const upstreamRes = await fetch(target, {
     method: c.req.method,
     headers: upstreamHeaders,
-    body: ["GET", "HEAD"].includes(c.req.method)
-      ? undefined
-      : await c.req.text(),
+    body: bodyData,
   });
   const durationMs = Date.now() - startedAt;
 

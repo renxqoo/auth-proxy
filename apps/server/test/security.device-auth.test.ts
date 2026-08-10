@@ -64,6 +64,19 @@ vi.mock("../src/repos/index.js", () => ({
   // verifyClient 通过 → 返回 clientId
   getAppRepo: () => ({
     verifyClient: vi.fn(async (cid: string) => cid),
+    findByClientId: vi.fn(async () => ({
+      id: 1,
+      clientId: "cli_test",
+      name: "test",
+      createdAt: new Date(),
+      revoked: false,
+      createdFromTokenId: null,
+      lastUsedAt: null,
+      allowedScopes: [],
+    })),
+  }),
+  getScopeRepo: () => ({
+    getSets: vi.fn(async () => ({ names: new Set<string>(), systemNames: new Set<string>() })),
   }),
 }));
 vi.mock("../src/deviceCodeStore.js", () => ({

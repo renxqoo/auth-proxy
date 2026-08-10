@@ -18,6 +18,8 @@ const STATUS_BY_CODE: Record<OAuthErrorCode, ContentfulStatusCode> = {
   invalid_client: 401,
   invalid_request: 400,
   unsupported_grant_type: 400,
+  unsupported_response_type: 400,
+  unauthorized_client: 400,
   invalid_scope: 400,
 };
 

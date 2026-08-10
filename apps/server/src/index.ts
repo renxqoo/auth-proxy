@@ -16,6 +16,8 @@ import { jwks } from "./routes/jwks.js";
 import { revoke } from "./routes/revoke.js";
 import { adminWeb } from "./routes/adminWeb.js";
 import { register } from "./routes/register.js";
+import { metadata } from "./routes/metadata.js";
+import { authorize } from "./routes/authorize.js";
 
 /**
  * @auth-proxy/server —— 鉴权中间层。
@@ -41,11 +43,17 @@ app.route("/revoke", revoke);
 // JWKS(公钥集合,供外部校验 JWT)
 app.route("/.well-known/jwks.json", jwks);
 
+// RFC 8414:OAuth 2.0 Authorization Server Metadata
+app.route("/.well-known/oauth-authorization-server", metadata);
+
 // admin 后台 API(session cookie 鉴权,必须登录后台)
 app.route("/admin/web", adminWeb);
 
 // 动态客户端注册(CLI 用注册令牌换 clientId/secret)
 app.route("/register", register);
+
+// OAuth 2.1 授权端点(authorization_code + PKCE)
+app.route("/authorize", authorize);
 
 // 浏览器登录页
 app.route("/verify", verify);

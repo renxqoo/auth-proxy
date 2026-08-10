@@ -87,7 +87,7 @@ async function postRegister(token: string, ip = "1.1.1.1") {
       "content-type": "application/json",
       "x-forwarded-for": ip,
     },
-    body: JSON.stringify({ registrationToken: token }),
+    body: JSON.stringify({ registrationToken: token, client_name: "toctou-test" }),
   });
 }
 

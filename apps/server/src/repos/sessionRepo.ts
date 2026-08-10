@@ -22,6 +22,24 @@ export interface SessionData {
   companyTokenExpiresAt: number; // unix ms
   scope: string;
   revoked: boolean;
+  sessionType: string; // "user" | "machine" | "agent"
+}
+
+/**
+ * machine session(client_credentials)无真实公司账号,company token 字段用此占位。
+ * 集中定义:判定"是否有可用 company token"只看这个常量,不散落字符串字面量。
+ */
+export const NO_COMPANY_TOKEN = "__none__";
+
+/**
+ * 判定 session 是否携带可用的 company token(能转发到公司应用)。
+ * 判定依据是真实状态(占位值/空),而非 sessionType 字符串标签 ——
+ * 任何带真实 company token 的 session(user / agent)都应能代理,
+ * 只有占位的 machine session 不能。
+ */
+export function hasCompanyToken(s: Pick<SessionData, "companyAccessToken">): boolean {
+  const t = s.companyAccessToken;
+  return typeof t === "string" && t.length > 0 && t !== NO_COMPANY_TOKEN;
 }
 
 /** company token 的最小契约(repo 不依赖 shared 的完整类型)。 */
@@ -74,6 +92,7 @@ export class SessionRepo {
     companyToken: CompanyTokenFields;
     companyTokenExpiresAt: number;
     scope: string;
+    sessionType?: string; // 默认 "user"
   }): Promise<SessionData> {
     const db = getDb();
     const [row] = await db
@@ -87,6 +106,40 @@ export class SessionRepo {
         companyRefreshToken: params.companyToken.refresh_token,
         companyTokenExpiresAt: new Date(params.companyTokenExpiresAt),
         scope: params.scope,
+        sessionType: params.sessionType ?? "user",
+      })
+      .returning();
+    const data = await this.hydrate(row!, params.companyUser);
+    await this.cacheSet(data);
+    return data;
+  }
+
+  /**
+   * 创建机器 session(client_credentials / agent 用)。
+   * 不需要真实的 company token(company 字段存占位空值)。
+   */
+  async createMachine(params: {
+    sessionId: string;
+    refreshId: string;
+    userId: number;
+    clientId: string;
+    companyUser: { id: string; name: string; scopes: string[] };
+    scope: string;
+    sessionType: string;
+  }): Promise<SessionData> {
+    const db = getDb();
+    const [row] = await db
+      .insert(sessions)
+      .values({
+        sessionId: params.sessionId,
+        userId: params.userId,
+        clientId: params.clientId,
+        refreshId: params.refreshId,
+        companyAccessToken: NO_COMPANY_TOKEN,
+        companyRefreshToken: NO_COMPANY_TOKEN,
+        companyTokenExpiresAt: new Date(Date.now() + 365 * 24 * 3600 * 1000),
+        scope: params.scope,
+        sessionType: params.sessionType,
       })
       .returning();
     const data = await this.hydrate(row!, params.companyUser);
@@ -250,6 +303,7 @@ export class SessionRepo {
       companyTokenExpiresAt: row.companyTokenExpiresAt.getTime(),
       scope: row.scope,
       revoked: row.revoked,
+      sessionType: row.sessionType,
     };
   }
 

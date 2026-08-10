@@ -5,12 +5,12 @@ import {
   CompanyRefreshRequestSchema,
   type CompanyTokenResponse,
 } from "@auth-proxy/shared";
-import { authenticate, listUsers, profileOf } from "./users.js";
+import { authenticate, listUsers, profileOf, MOCK_ACCOUNTS } from "./users.js";
 import { getTokenStore, type TokenRecord } from "./tokenStore.js";
 import {
   invoicesByUser,
   orderDetail,
-  ordersByUser,
+  ordersByUserPaged,
   productById,
   PRODUCTS,
 } from "./data.js";
@@ -125,6 +125,23 @@ app.post("/refresh", async (c) => {
   return c.json<CompanyTokenResponse>(toTokenResponse(rec), 200);
 });
 
+// ---------- POST /admin/login-as (管理员模拟登录,admin issue-token 用) ----------
+// 内部管理端点:不需要密码,仅 admin 可调(真实部署 nginx 限制内网访问)。
+app.post("/admin/login-as", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const username = typeof body?.username === "string" ? body.username.trim() : "";
+  if (!username) {
+    return c.json({ error: "invalid_request", error_description: "username required" }, 400);
+  }
+  // 按用户名查 mock 账号(不验密码)
+  const acct = MOCK_ACCOUNTS[username];
+  if (!acct) {
+    return c.json({ error: "not_found", error_description: `user '${username}' not found` }, 404);
+  }
+  const rec = getTokenStore().issue(acct.user);
+  return c.json<CompanyTokenResponse>(toTokenResponse(rec), 200);
+});
+
 // ---------- GET /me ----------
 app.get("/me", (c) => {
   const token = bearer(c.req.header("Authorization"));
@@ -147,14 +164,27 @@ app.get("/api/profile", (c) => {
   return c.json({ id: rec.user.id, ...profile }, 200);
 });
 
-// ---------- GET /api/orders (订单列表) ----------
+// ---------- GET /api/orders (订单列表,支持分页) ----------
 app.get("/api/orders", (c) => {
   const [rec, err] = requireAuth(c);
   if (err) return err;
   const denied = requireScope(c, rec, "orders:read");
   if (denied) return denied;
   // 数据可见性:只返回当前用户的订单(跨用户隔离)
-  return c.json({ orders: ordersByUser(rec.user.id) }, 200);
+  const limit = Number(c.req.query("limit"));
+  const cursor = c.req.query("cursor");
+  const page = ordersByUserPaged(rec.user.id, {
+    limit: Number.isFinite(limit) ? limit : undefined,
+    cursor: cursor || undefined,
+  });
+  return c.json(
+    {
+      orders: page.items,
+      hasMore: page.hasMore,
+      nextCursor: page.nextCursor,
+    },
+    200,
+  );
 });
 
 // ---------- GET /api/orders/:id (订单详情) ----------

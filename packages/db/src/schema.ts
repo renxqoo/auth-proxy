@@ -57,6 +57,44 @@ export const apps = pgTable("apps", {
   revoked: boolean("revoked").notNull().default(false),
   createdFromTokenId: integer("created_from_token_id"), // 注册自哪个令牌
   lastUsedAt: timestamp("last_used_at", { withTimezone: true }), // 最后使用(登录时更新)
+  // 该 client 允许请求的 scope 子集。空 [] = 允许全部已定义 scope(默认,向后兼容);
+  // admin 裁剪后只允许列出的。运行时 device_authorization 校验:请求的 scope 必须 ∈ 此集合。
+  allowedScopes: text("allowed_scopes").array().notNull().default([]),
+  // RFC 7591 client_metadata(RFC 7591 §2):注册时声明,authorization_code 流程校验用
+  redirectUris: text("redirect_uris").array().notNull().default([]), // 允许的回调地址
+  grantTypes: text("grant_types").array().notNull().default([]), // 该 client 允许的 grant_type
+  tokenEndpointAuthMethod: text("token_endpoint_auth_method").notNull().default("client_secret_basic"), // client 认证方式
+});
+
+// ---------- scopes(全局 scope 定义) ----------
+// OAuth 标准三层 scope 管理之层 1:全局定义。取代环境变量白名单,可经 admin 后台增删。
+// isSystem=true 的 scope 是中间层自身管理的(offline_access/company.api),
+// 不参与用户权限收窄(narrowScope 豁免它们)。
+export const scopes = pgTable("scopes", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull().unique(), // "orders:read"
+  description: text("description"), // "读订单列表/详情"
+  isSystem: boolean("is_system").notNull().default(false), // 系统 scope,豁免用户收窄
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+// ---------- route_policies(网关路径→scope 策略) ----------
+// 企业级纵深防御之层 4:gateway 转发前校验 token.scope 是否覆盖该路径所需 scope。
+// 默认拒绝:没匹配到任何策略的路径 → gateway 直接 403(强制所有路径显式配策略)。
+// pattern 用简单通配符:/api/orders* 匹配 /api/orders 和 /api/orders/123。
+// scope 为 null 表示"只需有效 token,不要业务 scope"(如 /me、/api/profile 自身信息)。
+// method 为 null 表示匹配所有 HTTP 方法。
+export const routePolicies = pgTable("route_policies", {
+  id: serial("id").primaryKey(),
+  pattern: text("pattern").notNull(), // "/api/orders*"(去掉 /proxy 前缀后的上游路径)
+  scope: text("scope"), // "orders:read";null = 只验登录
+  method: text("method"), // "GET"/"POST"/null(=null 匹配所有方法)
+  description: text("description"),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
 });
 
 // ---------- users ----------
@@ -88,6 +126,8 @@ export const sessions = pgTable("sessions", {
   }).notNull(),
   scope: text("scope").notNull(),
   revoked: boolean("revoked").notNull().default(false),
+  // session 类型:user=用户登录 / machine=client_credentials / agent=admin 预签发
+  sessionType: text("session_type").notNull().default("user"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -174,6 +214,10 @@ export type SigningKey = typeof signingKeys.$inferSelect;
 export type NewSigningKey = typeof signingKeys.$inferInsert;
 export type App = typeof apps.$inferSelect;
 export type NewApp = typeof apps.$inferInsert;
+export type Scope = typeof scopes.$inferSelect;
+export type NewScope = typeof scopes.$inferInsert;
+export type RoutePolicy = typeof routePolicies.$inferSelect;
+export type NewRoutePolicy = typeof routePolicies.$inferInsert;
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type Session = typeof sessions.$inferSelect;

@@ -40,13 +40,19 @@ vi.mock("../src/jwt.js", () => ({
   bearerOf: (h?: string) => h?.replace(/^Bearer\s+/, ""),
   verifyAccessToken: vi.fn(async (t?: string) =>
     t === "valid.jwt.token"
-      ? { sub: "sid_1", scope: "offline_access", typ: "access" as const }
+      ? { sub: "sid_1", scope: "offline_access", aud: "auth-proxy", client_id: "cli_1", typ: "access" as const }
       : null,
   ),
 }));
 vi.mock("../src/repos/index.js", () => ({
   getAuditRepo: () => ({
     writeApiLog: vi.fn(async () => {}),
+  }),
+  // 本测试聚焦响应头过滤/鉴权,不测 scope 策略 → 给一个全放行策略
+  getRoutePolicyRepo: () => ({
+    getPolicies: vi.fn(async () => [
+      { id: 1, pattern: "/*", scope: null, method: null, description: null, createdAt: new Date() },
+    ]),
   }),
 }));
 
@@ -133,18 +139,20 @@ describe("SECURITY: gateway 不透传上游 set-cookie / location", () => {
 });
 
 describe("SECURITY: gateway 鉴权 —— 缺/错 token 拒绝", () => {
-  it("无 Authorization → invalid_grant", async () => {
+  it("无 Authorization → 401 invalid_token", async () => {
     const res = await gateway.request("http://localhost/proxy/x", {
       method: "GET",
     });
-    expect(res.status).toBe(400); // oauthError invalid_grant → 400
+    expect(res.status).toBe(401); // RFC 6750:缺 token → 401
+    expect(res.headers.get("www-authenticate")).toMatch(/^Bearer/);
   });
 
-  it("无效 token → invalid_grant", async () => {
+  it("无效 token → 401 invalid_token", async () => {
     const res = await gateway.request("http://localhost/proxy/x", {
       method: "GET",
       headers: { Authorization: "Bearer invalid" },
     });
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toMatch(/^Bearer/);
   });
 });

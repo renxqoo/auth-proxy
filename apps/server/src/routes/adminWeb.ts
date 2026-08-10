@@ -5,8 +5,12 @@ import {
   getTokenRepo,
   getAppRepo,
   getAuditRepo,
+  getScopeRepo,
+  getRoutePolicyRepo,
 } from "../repos/index.js";
-import { revokeSessionsByClient } from "../sessionStore.js";
+import { revokeSessionsByClient, createSession } from "../sessionStore.js";
+import { loginAsCompany, CompanyAuthError } from "../companyAuth.js";
+import { signAccessToken, signRefreshToken } from "../jwt.js";
 import { safeError } from "../config.js";
 import {
   requireAdminSession,
@@ -203,6 +207,260 @@ adminWeb.delete("/apps/:id", async (c) => {
   await revokeSessionsByClient(app.clientId);
   await getAppRepo().delete(id);
   return c.json({ ok: true });
+});
+
+// 设置 client 允许的 scope 子集(层 3:client 绑定)。
+// body: { scopes: string[] } — 每个 scope 必须在全局 scopes 表里定义过。
+// 空数组 = 允许全部已定义 scope(向后兼容默认)。
+adminWeb.post("/apps/:id/scopes", async (c) => {
+  const id = Number(c.req.param("id"));
+  const app = await getAppRepo().findById(id);
+  if (!app) return c.json({ error: "not_found" }, 404);
+  const body = await c.req.json().catch(() => null);
+  const scopes = Array.isArray(body?.scopes)
+    ? body.scopes.filter((s: unknown): s is string => typeof s === "string" && s.length > 0)
+    : null;
+  if (scopes === null) {
+    return c.json(
+      { error: "invalid_request", error_description: "scopes[] required" },
+      400,
+    );
+  }
+  // 校验:每个 scope 必须在全局定义内(防注入未定义 scope)
+  const { names: globalNames } = await getScopeRepo().getSets();
+  if (globalNames.size > 0) {
+    for (const s of scopes) {
+      if (!globalNames.has(s)) {
+        return c.json(
+          {
+            error: "invalid_request",
+            error_description: `scope ${s} is not defined in global scopes`,
+          },
+          400,
+        );
+      }
+    }
+  }
+  const ok = await getAppRepo().setAllowedScopes(id, scopes);
+  return ok ? c.json({ ok: true, allowedScopes: scopes }) : c.json({ error: "not_found" }, 404);
+});
+
+// ---------- scope 定义管理(层 1:全局定义)----------
+adminWeb.get("/scopes", async (c) => {
+  const list = await getScopeRepo().list();
+  return c.json({ scopes: list });
+});
+
+adminWeb.post("/scopes", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const name = typeof body?.name === "string" ? body.name.trim() : "";
+  const description =
+    typeof body?.description === "string" ? body.description.trim() : "";
+  const isSystem = body?.isSystem === true;
+  if (!name || name.length > MAX_NAME_LEN) {
+    return c.json(
+      {
+        error: "invalid_request",
+        error_description: "name required (<=256 chars)",
+      },
+      400,
+    );
+  }
+  const rec = await getScopeRepo().create({ name, description, isSystem });
+  if (!rec) {
+    return c.json(
+      { error: "conflict", error_description: "scope name already exists" },
+      409,
+    );
+  }
+  return c.json(rec, 201);
+});
+
+adminWeb.delete("/scopes/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  const existing = await getScopeRepo().findById(id);
+  if (!existing) return c.json({ error: "not_found" }, 404);
+  if (existing.isSystem) {
+    return c.json(
+      {
+        error: "invalid_request",
+        error_description: "system scopes cannot be deleted",
+      },
+      400,
+    );
+  }
+  const ok = await getScopeRepo().delete(id);
+  return ok ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
+});
+
+// ---------- 路径策略管理(层 4:gateway scope 校验)----------
+adminWeb.get("/route-policies", async (c) => {
+  const list = await getRoutePolicyRepo().list();
+  return c.json({ policies: list });
+});
+
+// body: { pattern, scope?, method?, description? }
+// scope 为空/null → 只需有效登录的策略(如 /me);非空须校验 ∈ 全局定义
+adminWeb.post("/route-policies", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const pattern = typeof body?.pattern === "string" ? body.pattern.trim() : "";
+  const scopeRaw = typeof body?.scope === "string" ? body.scope.trim() : "";
+  const method = typeof body?.method === "string" ? body.method.trim() : "";
+  const description =
+    typeof body?.description === "string" ? body.description.trim() : "";
+  if (!pattern || pattern.length > MAX_NAME_LEN) {
+    return c.json(
+      {
+        error: "invalid_request",
+        error_description: "pattern required (<=256 chars)",
+      },
+      400,
+    );
+  }
+  const scope = scopeRaw || null;
+  // scope 非空时校验必须在全局定义内
+  if (scope) {
+    const { names: globalNames } = await getScopeRepo().getSets();
+    if (globalNames.size > 0 && !globalNames.has(scope)) {
+      return c.json(
+        {
+          error: "invalid_request",
+          error_description: `scope ${scope} is not defined in global scopes`,
+        },
+        400,
+      );
+    }
+  }
+  const rec = await getRoutePolicyRepo().create({
+    pattern,
+    scope,
+    method: method || null,
+    description,
+  });
+  return c.json(rec, 201);
+});
+
+adminWeb.delete("/route-policies/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  const existing = await getRoutePolicyRepo().findById(id);
+  if (!existing) return c.json({ error: "not_found" }, 404);
+  const ok = await getRoutePolicyRepo().delete(id);
+  return ok ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
+});
+
+// ---------- admin 签发 agent token(sandbox/CI 场景)----------
+// 管理员为指定用户预签发 token,注入 sandbox 环境变量,无需 device flow。
+// 审计:记录谁(admin)为谁(username)签发了什么 scope 的 token。
+adminWeb.post("/issue-token", async (c) => {
+  const adminSession = c.get("adminSession");
+  const body = await c.req.json().catch(() => null);
+  const username = typeof body?.username === "string" ? body.username.trim() : "";
+  const scopeRaw = typeof body?.scope === "string" ? body.scope.trim() : "";
+  const expiresInSec = Number(body?.expiresInSec);
+
+  if (!username) {
+    return c.json(
+      { error: "invalid_request", error_description: "username required" },
+      400,
+    );
+  }
+
+  // TTL 校验(防永久 token)
+  const ttl =
+    Number.isFinite(expiresInSec) && expiresInSec > 0
+      ? Math.min(expiresInSec, config.agentTokenMaxTtlSec)
+      : config.jwtAccessTtlSec;
+
+  // 1. 通过公司应用管理端点获取该用户的 company token(不需要密码)
+  let companyToken;
+  try {
+    companyToken = await loginAsCompany(username);
+  } catch (e) {
+    safeError("[admin] issue-token: loginAsCompany failed:", e);
+    // CompanyAuthError → 保留真实状态码;其它 → 500
+    if (e instanceof CompanyAuthError) {
+      const httpStatus = (e.status >= 400 && e.status < 500 ? e.status : 502) as 400 | 401 | 403 | 404 | 502;
+      return c.json(
+        {
+          error: "invalid_request",
+          error_description: `company app error: ${e.code} — ${e.message}`,
+        },
+        httpStatus,
+      );
+    }
+    return c.json(
+      { error: "server_error", error_description: `cannot reach company app for '${username}'` },
+      502,
+    );
+  }
+
+  // 2. scope 校验(层 1 全局 + 层 2 用户权限收窄)
+  const requestedScope = scopeRaw || "offline_access";
+  const requestedScopes = requestedScope.split(/\s+/).filter((s: string) => s.length > 0);
+  // 全局定义校验
+  const { names: globalNames } = await getScopeRepo().getSets();
+  if (globalNames.size > 0) {
+    for (const s of requestedScopes) {
+      if (!globalNames.has(s)) {
+        return c.json(
+          { error: "invalid_request", error_description: `unknown scope: ${s}` },
+          400,
+        );
+      }
+    }
+  }
+  // 用户权限收窄:请求的 scope 必须是用户实际拥有的(companyToken.user.scopes)
+  const userScopeSet = new Set(companyToken.user.scopes);
+  const { systemNames } = await getScopeRepo().getSets();
+  const systemSet =
+    systemNames.size > 0
+      ? systemNames
+      : new Set(config.systemScopes.split(/\s+/).filter(Boolean));
+  for (const s of requestedScopes) {
+    if (systemSet.has(s)) continue;
+    if (!userScopeSet.has(s)) {
+      return c.json(
+        {
+          error: "invalid_request",
+          error_description: `user '${username}' does not have scope: ${s}`,
+        },
+        400,
+      );
+    }
+  }
+  // offline_access 自动补
+  if (!requestedScopes.includes("offline_access")) {
+    requestedScopes.push("offline_access");
+  }
+  const finalScope = requestedScopes.join(" ");
+
+  // 3. 创建 session(标记为 agent 类型)
+  const session = await createSession(companyToken, finalScope, `admin-issued`, "agent");
+
+  // 4. 签发 JWT + refresh token
+  const [accessToken, refreshToken] = await Promise.all([
+    signAccessToken(session.sessionId, finalScope, `admin-issued`, ttl),
+    signRefreshToken(session.sessionId, session.refreshId),
+  ]);
+
+  // 5. 审计:记录谁为谁签了什么
+  void getAuditRepo().writeLoginLog({
+    userCode: "",
+    username: `${username} [ADMIN-ISSUED by ${adminSession.username}]`,
+    clientId: "admin-issued",
+    success: true,
+  });
+
+  return c.json({
+    access_token: accessToken,
+    token_type: "Bearer",
+    expires_in: ttl,
+    refresh_token: refreshToken,
+    scope: finalScope,
+    sessionId: session.sessionId,
+    user: { id: companyToken.user.id, name: companyToken.user.name },
+    hint: "Inject this token into the agent's environment (e.g. RXCLI_BEARER_TOKEN or credentials file)",
+  });
 });
 
 // ---------- 审计 ----------

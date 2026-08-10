@@ -19,7 +19,22 @@ const redisRef: { redis: unknown } = {
 };
 vi.mock("../src/infra.js", () => ({ getRedis: () => redisRef.redis }));
 vi.mock("../src/repos/index.js", () => ({
-  getAppRepo: () => ({ verifyClient: vi.fn(async (cid: string) => cid) }),
+  getAppRepo: () => ({
+    verifyClient: vi.fn(async (cid: string) => cid),
+    findByClientId: vi.fn(async () => ({
+      id: 1,
+      clientId: "cli_test",
+      name: "test",
+      createdAt: new Date(),
+      revoked: false,
+      createdFromTokenId: null,
+      lastUsedAt: null,
+      allowedScopes: [],
+    })),
+  }),
+  getScopeRepo: () => ({
+    getSets: vi.fn(async () => ({ names: new Set<string>(), systemNames: new Set<string>() })),
+  }),
 }));
 const { createSpy } = vi.hoisted(() => ({
   createSpy: vi.fn(async () => ({

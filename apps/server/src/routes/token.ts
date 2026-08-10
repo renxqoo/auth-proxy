@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { TokenResponse } from "@auth-proxy/shared";
 import { config } from "../config.js";
 import {
@@ -7,8 +8,10 @@ import {
   refreshExpiry,
   updateDeviceCode,
 } from "../deviceCodeStore.js";
+import { findAuthCode, consumeAuthCode } from "../authCodeStore.js";
 import {
   createSession,
+  createMachineSession,
   findSessionByRefreshId,
   findRefreshHistory,
   recordRefreshRotation,
@@ -18,7 +21,10 @@ import {
 } from "../sessionStore.js";
 import { oauthError, verifyClient } from "../oauthHelpers.js";
 import { enforceRateLimit } from "../middleware/rateLimit.js";
-import { getAuditRepo } from "../repos/index.js";
+import { getAuditRepo, getScopeRepo, getAppRepo } from "../repos/index.js";
+import { getDb } from "../infra.js";
+import { users } from "@auth-proxy/db";
+import { eq } from "drizzle-orm";
 import {
   signAccessToken,
   signRefreshToken,
@@ -26,6 +32,77 @@ import {
 } from "../jwt.js";
 
 const DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
+
+/**
+ * PKCE S256 校验:base64url(sha256(code_verifier)) === code_challenge?
+ * timingSafeEqual 比对(防 timing 攻击)。
+ */
+function verifyPkce(codeVerifier: string, codeChallenge: string): boolean {
+  const computed = createHash("sha256").update(codeVerifier).digest("base64url");
+  const a = Buffer.from(computed);
+  const b = Buffer.from(codeChallenge);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+/**
+ * authorization_code grant(RFC 6749 §4.1.3 + PKCE RFC 7636)。
+ * 公开 client 可能无 secret → 按 code 记录的 clientId 认证。
+ */
+async function handleAuthCodeGrant(
+  c: Context,
+  form: Record<string, string>,
+): Promise<Response> {
+  const code = form.code;
+  const redirectUri = form.redirect_uri;
+  const clientIdForm = form.client_id;
+  const codeVerifier = form.code_verifier;
+
+  if (!code) {
+    return oauthError(c, "invalid_request", "code required");
+  }
+  if (!codeVerifier) {
+    return oauthError(c, "invalid_request", "code_verifier required (PKCE)");
+  }
+
+  const rec = await findAuthCode(code);
+  if (!rec || rec.status !== "authorized" || !rec.companyToken) {
+    return oauthError(c, "invalid_grant", "code invalid, expired, or already used");
+  }
+
+  // client_id 校验(公开 client:form 里的 client_id 须 = code 记录的 clientId)
+  if (clientIdForm && clientIdForm !== rec.clientId) {
+    return oauthError(c, "invalid_grant", "client_id mismatch");
+  }
+
+  // redirect_uri 校验:必须与 /authorize 时的一致(RFC 6749 §4.1.3)
+  if (redirectUri !== rec.redirectUri) {
+    return oauthError(c, "invalid_grant", "redirect_uri mismatch");
+  }
+
+  // PKCE S256 校验
+  if (!verifyPkce(codeVerifier, rec.codeChallenge)) {
+    return oauthError(c, "invalid_grant", "PKCE verification failed");
+  }
+
+  // scope 收窄(层 2:用户权限)
+  const grantedScope = await narrowScope(rec.scope, rec.companyToken.user.scopes);
+  if (grantedScope === null) {
+    return oauthError(c, "invalid_scope", "requested scope exceeds user's granted permissions");
+  }
+
+  // 消费授权码(一次性)
+  const consumed = await consumeAuthCode(code);
+  if (!consumed) {
+    return oauthError(c, "invalid_grant", "code already consumed");
+  }
+
+  // 创建 session + 签发 token
+  const session = await createSession(rec.companyToken, grantedScope, rec.clientId);
+  return c.json(
+    await issueTokenResponse(session.sessionId, session.refreshId, grantedScope, session.data.clientId),
+  );
+}
 
 /**
  * POST /token —— 换 token(RFC 8628 §3.4 + RFC 6749 §6 刷新)。
@@ -38,6 +115,13 @@ export const token = new Hono();
 token.post("/", async (c) => {
   const form = await c.req.parseBody();
   const grantType = String(form.grant_type ?? "");
+
+  // authorization_code grant:public client(PKCE)可能无 secret,
+  // 按 code 记录的 clientId 认证(在 handleAuthCodeGrant 里校验)。
+  // 其它 grant(device_code/refresh_token)走标准 client 认证(Basic/body secret)。
+  if (grantType === "authorization_code") {
+    return handleAuthCodeGrant(c, form as Record<string, string>);
+  }
 
   const clientId = await verifyClient(
     c.req.header("Authorization"),
@@ -64,6 +148,9 @@ token.post("/", async (c) => {
   if (grantType === DEVICE_CODE_GRANT) {
     return handleDeviceCodeGrant(c, form as Record<string, string>);
   }
+  if (grantType === "client_credentials") {
+    return handleClientCredentialsGrant(c, form as Record<string, string>, clientId);
+  }
   if (grantType === "refresh_token") {
     return handleRefreshGrant(c, form as Record<string, string>);
   }
@@ -73,6 +160,118 @@ token.post("/", async (c) => {
     `unsupported grant_type: ${grantType}`,
   );
 });
+
+/**
+ * client_credentials grant(RFC 6749 §4.4)— 机器对机器。
+ * 无用户参与;用 client_id + client_secret 认证。
+ * session 标记为 "machine",company token 占位(不需要)。
+ */
+async function handleClientCredentialsGrant(
+  c: Context,
+  form: Record<string, string>,
+  clientId: string,
+): Promise<Response> {
+  // scope 校验(层 1 全局 + 层 3 client 绑定;无用户 scope 收窄,因为无用户)
+  const requestedScope = form.scope ?? "";
+  const requestedScopes = requestedScope.split(/\s+/).filter((s) => s.length > 0);
+  const { names: globalNames, systemNames } = await getScopeRepo().getSets();
+  const globalAllowed =
+    globalNames.size > 0
+      ? globalNames
+      : new Set(config.allowedScopes.split(/\s+/).filter(Boolean));
+  const systemSet =
+    systemNames.size > 0
+      ? systemNames
+      : new Set(config.systemScopes.split(/\s+/).filter(Boolean));
+  const app = await getAppRepo().findByClientId(clientId);
+  const clientAllowed =
+    app && app.allowedScopes.length > 0 ? new Set(app.allowedScopes) : null;
+  for (const s of requestedScopes) {
+    if (!globalAllowed.has(s)) {
+      return oauthError(c, "invalid_scope", `unknown or disallowed scope: ${s}`);
+    }
+    if (clientAllowed && !systemSet.has(s) && !clientAllowed.has(s)) {
+      return oauthError(c, "invalid_scope", `scope ${s} not allowed for this client`);
+    }
+  }
+  // offline_access 自动补
+  const finalScopes = [...requestedScopes];
+  if (!finalScopes.includes("offline_access")) finalScopes.push("offline_access");
+  const finalScope = finalScopes.join(" ");
+
+  // 查 system 用户(client_credentials 的虚拟用户)
+  const db = getDb();
+  const sysUser = await db
+    .select()
+    .from(users)
+    .where(eq(users.companyUserId, "__system_client_credentials__"));
+  if (sysUser.length === 0) {
+    return oauthError(c, "invalid_grant", "system user not seeded");
+  }
+
+  // 创建机器 session
+  const session = await createMachineSession({
+    userId: sysUser[0]!.id,
+    companyUser: {
+      id: sysUser[0]!.companyUserId,
+      name: sysUser[0]!.name,
+      scopes: [],
+    },
+    scope: finalScope,
+    clientId,
+    sessionType: "machine",
+  });
+
+  return c.json(
+    await issueTokenResponse(
+      session.sessionId,
+      session.refreshId,
+      finalScope,
+      session.data.clientId,
+    ),
+  );
+}
+
+/**
+ * scope 收窄(层 2:用户权限):把请求的 scope 限制在用户实际拥有的权限内。
+ *
+ * - 系统 scope(scopes 表 isSystem=true,如 offline_access / company.api)是中间层
+ *   自身管理的,不属于公司应用返回的用户权限(user.scopes),不参与权限比对(自动放行)。
+ *   系统 scope 从 DB 读(带缓存);表为空时回退 config.systemScopes(向后兼容)。
+ * - 请求的其它 scope 必须全部 ∈ userScopes;否则返回 null(调用方返 invalid_scope)。
+ * - 返回值:收窄后的 scope 字符串(保留请求顺序,含系统 scope)。
+ *
+ * 设计:授权边界在签发时生效 —— 即便请求了超出权限的 scope,token 里也
+ * 只会包含用户实际拥有的。但为了符合 OAuth 的"最小惊讶"并避免静默降级,
+ * 对越权请求直接拒绝(invalid_scope),而非悄悄裁剪。
+ */
+async function narrowScope(
+  requested: string,
+  userScopes: string[],
+): Promise<string | null> {
+  const requestedScopes = requested.split(/\s+/).filter((s) => s.length > 0);
+  const userScopeSet = new Set(userScopes);
+  // 系统 scope 从 DB 读(isSystem=true);表为空时回退环境变量
+  const { systemNames } = await getScopeRepo().getSets();
+  const systemScopeSet =
+    systemNames.size > 0
+      ? systemNames
+      : new Set(config.systemScopes.split(/\s+/).filter(Boolean));
+  for (const s of requestedScopes) {
+    if (systemScopeSet.has(s)) continue; // 系统 scope,放行
+    if (!userScopeSet.has(s)) return null; // 越权 → 拒绝
+  }
+  // 保留请求顺序(去重)
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const s of requestedScopes) {
+    if (!seen.has(s)) {
+      seen.add(s);
+      out.push(s);
+    }
+  }
+  return out.join(" ");
+}
 
 // ---------- A. device_code grant ----------
 async function handleDeviceCodeGrant(
@@ -115,9 +314,21 @@ async function handleDeviceCodeGrant(
       if (!rec.companyToken) {
         return oauthError(c, "expired_token", "device_code missing token");
       }
+      // scope 收窄:请求的 scope 必须是用户实际拥有的(user.scopes,
+      // 登录时公司应用返回并快照进 companyToken.user)。请求了用户没有的
+      // scope → invalid_scope(防止用户拿到超出自身权限的 token)。
+      // offline_access 是中间层自身所需的续期 scope,不计入用户权限比对。
+      const grantedScope = await narrowScope(rec.scope, rec.companyToken.user.scopes);
+      if (grantedScope === null) {
+        return oauthError(
+          c,
+          "invalid_scope",
+          "requested scope exceeds user's granted permissions",
+        );
+      }
       const session = await createSession(
         rec.companyToken,
-        rec.scope,
+        grantedScope,
         rec.clientId,
       );
       await consumeDeviceCode(deviceCode);
@@ -125,7 +336,8 @@ async function handleDeviceCodeGrant(
         await issueTokenResponse(
           session.sessionId,
           session.refreshId,
-          rec.scope,
+          grantedScope,
+          session.data.clientId,
         ),
       );
     }
@@ -173,7 +385,8 @@ async function handleRefreshGrant(
       await issueTokenResponse(
         updated.sessionId,
         updated.refreshId,
-        `company.api offline_access`,
+        updated.scope,
+        updated.clientId,
       ),
     );
   }
@@ -212,7 +425,8 @@ async function handleGraceOrReuse(
       await issueTokenResponse(
         session.sessionId,
         session.refreshId,
-        `company.api offline_access`,
+        session.scope,
+        session.clientId,
       ),
     );
   }
@@ -237,9 +451,10 @@ async function issueTokenResponse(
   sessionId: string,
   refreshId: string,
   scope: string,
+  clientId: string,
 ): Promise<TokenResponse> {
   const [accessToken, newRefreshToken] = await Promise.all([
-    signAccessToken(sessionId, scope),
+    signAccessToken(sessionId, scope, clientId),
     signRefreshToken(sessionId, refreshId),
   ]);
   return {

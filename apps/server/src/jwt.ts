@@ -22,6 +22,8 @@ import { getSigningKeyRepo } from "./repos/index.js";
 export interface AccessClaims {
   sub: string; // sessionId
   scope: string;
+  aud: string; // 资源服务器标识(RFC 9068 §3)
+  client_id: string; // 请求该 token 的 client(RFC 9068 §3,审计/细粒度校验用)
   typ: "access";
 }
 
@@ -60,15 +62,18 @@ async function getVerifier() {
 export async function signAccessToken(
   sessionId: string,
   scope: string,
+  clientId: string,
+  ttlSec?: number,
 ): Promise<string> {
   const key = await getSigningKeyRepo().getActive();
   const privateKey = await importPKCS8(key.privatePem, "RS256");
-  return new SignJWT({ scope, typ: "access" })
+  return new SignJWT({ scope, typ: "access", client_id: clientId })
     .setProtectedHeader({ alg: "RS256", kid: key.kid })
     .setIssuer(config.jwtIssuer)
+    .setAudience(config.jwtAudience)
     .setSubject(sessionId)
     .setIssuedAt()
-    .setExpirationTime(`${config.jwtAccessTtlSec}s`)
+    .setExpirationTime(`${ttlSec ?? config.jwtAccessTtlSec}s`)
     .sign(privateKey);
 }
 
@@ -96,11 +101,14 @@ export async function verifyAccessToken(
     const verifier = await getVerifier();
     const { payload } = await jwtVerify(token, verifier, {
       issuer: config.jwtIssuer,
+      audience: config.jwtAudience,
     });
     if (payload.typ !== "access") return null;
     return {
       sub: payload.sub ?? "",
       scope: (payload.scope as string | undefined) ?? "",
+      aud: (payload.aud as string | undefined) ?? "",
+      client_id: (payload.client_id as string | undefined) ?? "",
       typ: "access",
     };
   } catch {

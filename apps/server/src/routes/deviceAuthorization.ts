@@ -4,6 +4,7 @@ import { config } from "../config.js";
 import { createDeviceCode } from "../deviceCodeStore.js";
 import { oauthError, verifyClient } from "../oauthHelpers.js";
 import { enforceRateLimit } from "../middleware/rateLimit.js";
+import { getAppRepo, getScopeRepo } from "../repos/index.js";
 
 /**
  * POST /device_authorization —— 申请设备码(RFC 8628 §3.1)。
@@ -36,11 +37,55 @@ deviceAuthorization.post("/", async (c) => {
     );
   }
 
-  // scope 处理:接受 CLI 传的 scope;offline_access 一定带上(中间层必发 refresh_token)
+  // scope 三层校验(RFC 6749 §3.3 + OAuth 2.1):
+  //   层 1(全局):请求的 scope 必须在 scopes 表里定义过(否则 invalid_scope)
+  //   层 3(client):请求的 scope 必须在该 client 的 allowedScopes 内
+  //                 (allowedScopes 为空 = 允许全部已定义,向后兼容)
+  // 系统 scope(offline_access/company.api)自动补上,不要求 client 显式声明
   const requestedScope = typeof form.scope === "string" ? form.scope : "";
-  const scopes = requestedScope.split(/\s+/).filter((s) => s.length > 0);
-  if (!scopes.includes("offline_access")) scopes.push("offline_access");
-  const scope = scopes.join(" ");
+  const requestedScopes = requestedScope
+    .split(/\s+/)
+    .filter((s) => s.length > 0);
+
+  // 从 DB 读全局 scope 定义(带缓存);表为空时回退环境变量(向后兼容)
+  const { names: globalNames, systemNames } = await getScopeRepo().getSets();
+  const globalAllowed =
+    globalNames.size > 0
+      ? globalNames
+      : new Set(config.allowedScopes.split(/\s+/).filter(Boolean));
+  // 系统 scope(offline_access/company.api)豁免 client 绑定:它们是中间层自身 scope,
+  // 由入口自动补上,不要求 client 在 allowedScopes 里显式声明(否则每个 client 都得列)。
+  const systemSet =
+    systemNames.size > 0
+      ? systemNames
+      : new Set(config.systemScopes.split(/\s+/).filter(Boolean));
+
+  // 查 client 的 allowedScopes(层 3)
+  const app = await getAppRepo().findByClientId(clientId);
+  const clientAllowed =
+    app && app.allowedScopes.length > 0
+      ? new Set(app.allowedScopes)
+      : null; // null = 不限制(允许全部已定义)
+
+  for (const s of requestedScopes) {
+    // 层 1:全局定义
+    if (!globalAllowed.has(s)) {
+      return oauthError(c, "invalid_scope", `unknown or disallowed scope: ${s}`);
+    }
+    // 层 3:client 绑定(非空时限制)。系统 scope 豁免(自动补,不需 client 声明)
+    if (clientAllowed && !systemSet.has(s) && !clientAllowed.has(s)) {
+      return oauthError(
+        c,
+        "invalid_scope",
+        `scope ${s} not allowed for this client`,
+      );
+    }
+  }
+
+  // offline_access 由入口自动补上(中间层必发 refresh_token),无需 client 显式声明
+  const finalScopes = [...requestedScopes];
+  if (!finalScopes.includes("offline_access")) finalScopes.push("offline_access");
+  const scope = finalScopes.join(" ");
 
   const rec = await createDeviceCode(clientId, scope);
   const verificationUri = `${publicBase(c)}/verify`;

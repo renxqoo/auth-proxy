@@ -57,6 +57,22 @@ export async function loginWithCompany(
   return CompanyTokenResponseSchema.parse(body);
 }
 
+/**
+ * 管理员模拟登录(admin 签发 agent token 用)。
+ * 不需要用户密码;调公司应用的管理端点 POST /admin/login-as。
+ * 真实公司应用接入时实现等价端点(内部管理网络限制)。
+ */
+export async function loginAsCompany(username: string): Promise<CompanyTokenResponse> {
+  const res = await fetch(`${config.companyApiBase}/admin/login-as`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username }),
+  });
+  if (!res.ok) await parseCompanyError(res);
+  const body = await res.json();
+  return CompanyTokenResponseSchema.parse(body);
+}
+
 export async function refreshWithCompany(
   refreshToken: string,
 ): Promise<CompanyTokenResponse> {
